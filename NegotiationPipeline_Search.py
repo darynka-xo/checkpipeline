@@ -173,5 +173,8 @@ class Pipeline:
             "input": user_message,
             "chat_history": messages
         })
+        if len(messages) <= 1:
+            response["output"] = "Здравствуйте! Буду рад Вам помочь. Ниже представлен анализ вашей ситуации.\n\n" + \
+                                 response["output"]
 
         return response["output"]
