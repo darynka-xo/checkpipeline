@@ -10,6 +10,8 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import tool, BaseTool
 from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain_core.messages import SystemMessage, HumanMessage
+
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
@@ -76,16 +78,15 @@ def analyze_external_text(text: str) -> str:
             temperature=0.5
         )
 
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", "Вы — эксперт по нормативной и экономической аналитике. Проанализируйте следующий текст и выделите ключевые выводы, которые могут повлиять на стратегию переговоров или инвестиционную политику."),
-            ("user", text[:4000])
-        ])
+        messages = [
+            SystemMessage(content="Вы — эксперт по нормативной и экономической аналитике. Проанализируйте следующий текст и выделите ключевые выводы, которые могут повлиять на стратегию переговоров или инвестиционную политику."),
+            HumanMessage(content=text[:4000])
+        ]
 
-        result = model.invoke(prompt.format_messages())
+        result = model.invoke(messages)
         return result.content
     except Exception as e:
         return f"[Ошибка анализа: {str(e)}]"
-
 
 class Pipeline:
     class Valves(BaseModel):
