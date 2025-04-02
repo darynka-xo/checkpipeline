@@ -80,8 +80,10 @@ class Pipeline:
 
         prompt = ChatPromptTemplate.from_messages([
             ("system", system_message),
-            ("user", user_message)
+            ("user", "{user_message}")
         ])
 
-        response = model.invoke(prompt.format_messages())
+        formatted_messages = prompt.format_messages(user_input=user_message)
+
+        response = model.invoke(formatted_messages)
         return response.content
