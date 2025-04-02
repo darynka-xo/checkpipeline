@@ -82,8 +82,7 @@ class Pipeline:
             ("system", system_message),
             ("user", user_message)
         ])
-        print(system_message)
-        print(user_message)
 
         response = model.invoke(prompt.format_messages())
+
         return response.content
