@@ -5,7 +5,7 @@ import asyncio
 from typing import List, Union, Generator, Iterator
 from pydantic import BaseModel
 from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
@@ -79,10 +79,11 @@ class Pipeline:
         )
 
         prompt = ChatPromptTemplate.from_messages([
-            ("system", system_message),
-            ("user", user_message)
+            SystemMessagePromptTemplate.from_template(system_message),
+            HumanMessagePromptTemplate.from_template("{user_input}")
         ])
 
-        response = model.invoke(prompt.format_messages())
+        formatted_messages = prompt.format_messages(user_input=user_message)
+        response = model.invoke(formatted_messages)
 
         return response.content
