@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.outputs import LLMResult
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
@@ -75,7 +76,8 @@ class Pipeline:
         model = ChatOpenAI(
             api_key=self.valves.OPENAI_API_KEY,
             model=self.valves.MODEL_ID,
-            temperature=self.valves.TEMPERATURE
+            temperature=self.valves.TEMPERATURE,
+            streaming=True
         )
 
         prompt = ChatPromptTemplate.from_messages([
@@ -84,6 +86,7 @@ class Pipeline:
         ])
 
         formatted_messages = prompt.format_messages(user_input=user_message)
-        response = model.invoke(formatted_messages)
 
-        return response.content
+        for chunk in model.stream(formatted_messages):
+            if hasattr(chunk, "content") and chunk.content:
+                yield chunk.content
