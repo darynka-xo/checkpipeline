@@ -47,7 +47,7 @@ class Pipeline:
         embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
         vectorstore = PGVector(
-            connection_string=os.getenv("PGVECTOR_URL", "postgresql://postgres:admin123@localhost:5432/postgres"),
+            connection_string=os.getenv("PGVECTOR_URL", "postgresql://postgres:admin123@host.docker.internal:5432/postgres"),
             collection_name="laws_chunks_ru",  # Должна быть с embeddings vector(384)
             embedding_function=embeddings
         )
