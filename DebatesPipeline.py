@@ -2,12 +2,10 @@ import logging
 import sys
 import os
 import asyncio
-from typing import List, Union, Generator, Iterator
+from typing import List, Iterator, Callable
 from pydantic import BaseModel
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
-from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.outputs import LLMResult
 from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.vectorstores.pgvector import PGVector
 
@@ -20,7 +18,7 @@ class Pipeline:
         MODEL_ID: str = "gpt-4o"
         TEMPERATURE: float = 0.5
         MAX_TOKENS: int = 1500
-        OPENAI_API_KEY: str = ""
+        OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 
     def __init__(self):
         self.name = "Debate Pipeline"
@@ -32,10 +30,10 @@ class Pipeline:
     async def on_shutdown(self):
         logging.info("Pipeline is shutting down...")
 
-    async def make_request_with_retry(self, fn, retries=3, *args, **kwargs):
+    async def make_request_with_retry(self, fn: Callable[[], Iterator[str]], retries=3) -> Iterator[str]:
         for attempt in range(retries):
             try:
-                return await fn(*args, **kwargs)
+                return fn()
             except Exception as e:
                 logging.error(f"Attempt {attempt + 1} failed: {e}")
                 if attempt + 1 == retries:
@@ -43,7 +41,7 @@ class Pipeline:
                 await asyncio.sleep(2 ** attempt)
 
     def pipe(
-            self, user_message: str, model_id: str, messages: List[dict], body: dict
+        self, user_message: str, model_id: str, messages: List[dict], body: dict
     ) -> Iterator[str]:
         # Подключение к векторной БД
         embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
@@ -58,38 +56,38 @@ class Pipeline:
         docs = retriever.get_relevant_documents(user_message)
         legal_context = "\n\n".join([f"- {doc.page_content}" for doc in docs])
 
-        # Оригинальный system prompt + контекст из БД
+        # System message with injected legal context
         system_message = f"""
-        **Роль**: Вы - профессиональный аналитик дебатов, специализирующийся на глубоком и беспристрастном разборе аргументов с точки зрения нормативных актов Казахстана.
+**Роль**: Вы - профессиональный аналитик дебатов, специализирующийся на глубоком и беспристрастном разборе аргументов с точки зрения нормативных актов Казахстана.
 
-        **Контекст из нормативных документов**:
-        {legal_context}
+**Контекст из нормативных документов**:
+{legal_context}
 
-        **Цель анализа**:
-        1. Провести всестороннюю экспертизу предоставленного аргумента
-        2. Оценить логическую структуру и соответствие нормативным требованиям
-        3. Выявить потенциальные слабости и предложить конкретные улучшения
+**Цель анализа**:
+1. Провести всестороннюю экспертизу предоставленного аргумента
+2. Оценить логическую структуру и соответствие нормативным требованиям
+3. Выявить потенциальные слабости и предложить конкретные улучшения
 
-        **Требования к анализу**:
+**Требования к анализу**:
 
-        #### 1. Раздел "Аналитическая записка"
-        - Полный структурированный разбор аргумента
-        - Оценка логической связности и аргументированности
-        - Выявление скрытых посылок и неявных допущений
-        - Определение уровня доказательности каждого тезиса
+#### 1. Раздел "Аналитическая записка"
+- Полный структурированный разбор аргумента
+- Оценка логической связности и аргументированности
+- Выявление скрытых посылок и неявных допущений
+- Определение уровня доказательности каждого тезиса
 
-        #### 2. Раздел "Отчет о соответствии нормативным актам"
-        - Детальная проверка каждого утверждения на соответствие официальным нормам
-        - Точные ссылки на конкретные статьи и пункты нормативных документов
-        - Квалификация обнаруженных отклонений (minor/significant)
-        - Правовая оценка потенциальных нарушений
+#### 2. Раздел "Отчет о соответствии нормативным актам"
+- Детальная проверка каждого утверждения на соответствие официальным нормам
+- Точные ссылки на конкретные статьи и пункты нормативных документов
+- Квалификация обнаруженных отклонений (minor/significant)
+- Правовая оценка потенциальных нарушений
 
-        #### 3. Раздел "Рекомендации по улучшению"
-        - Конкретные предложения по доработке аргументации
-        - Методические рекомендации по усилению слабых позиций
-        - Альтернативные формулировки и подходы
-        - Стратегические советы для повышения убедительности
-        """
+#### 3. Раздел "Рекомендации по улучшению"
+- Конкретные предложения по доработке аргументации
+- Методические рекомендации по усилению слабых позиций
+- Альтернативные формулировки и подходы
+- Стратегические советы для повышения убедительности
+"""
 
         model = ChatOpenAI(
             api_key=self.valves.OPENAI_API_KEY,
@@ -105,7 +103,11 @@ class Pipeline:
 
         formatted_messages = prompt.format_messages(user_input=user_message)
 
-        for chunk in model.stream(formatted_messages):
-            content = getattr(chunk, "content", None)
-            if content:
-                yield content
+        def stream_model() -> Iterator[str]:
+            for chunk in model.stream(formatted_messages):
+                content = getattr(chunk, "content", None)
+                if content:
+                    logging.debug(f"Model chunk: {content}")
+                    yield content
+
+        return asyncio.run(self.make_request_with_retry(stream_model))
