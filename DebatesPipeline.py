@@ -43,19 +43,18 @@ class Pipeline:
     def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict
     ) -> Iterator[str]:
-        # Подключение к векторной БД с новой моделью
-        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        # Подключение к векторной БД
+        embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
 
         vectorstore = PGVector(
-            connection_string=os.getenv("PGVECTOR_URL", "postgresql://postgres:admin123@host.docker.internal:5432/postgres"),
-            collection_name="laws_chunks_ru",  # Должна быть с embeddings vector(384)
+            connection_string=os.getenv("PGVECTOR_URL", "postgresql://admin:tester123@localhost:5432/postgres"),
+            collection_name="laws_chunks_ru",
             embedding_function=embeddings
         )
 
         retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 5})
         docs = retriever.get_relevant_documents(user_message)
         legal_context = "\n\n".join([f"- {doc.page_content}" for doc in docs])
-
 
         # System message with injected legal context
         system_message = f"""
