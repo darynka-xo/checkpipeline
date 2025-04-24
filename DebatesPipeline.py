@@ -99,7 +99,7 @@ class Pipeline:
                 api_key=self.valves.OPENAI_API_KEY,
                 model=self.valves.MODEL_ID,
                 temperature=self.valves.TEMPERATURE,
-                streaming=True
+                streaming=True,
             )
 
             prompt = ChatPromptTemplate.from_messages([
@@ -108,19 +108,33 @@ class Pipeline:
             ])
             formatted_messages = prompt.format_messages(user_input=user_message)
 
-            def stream_model() -> Iterator[str]:
-                for chunk in model.stream(formatted_messages):
-                    content = getattr(chunk, "content", None)
-                    if content:
-                        logging.debug(f"Model chunk: {content}")
-                        yield json.dumps({"content": content})  # ✅ JSON для OpenWebUI
+            async def stream_model():
+                try:
+                    for chunk in model.stream(formatted_messages):
+                        content = getattr(chunk, "content", None)
+                        if content:
+                            logging.debug(f"Chunk: {content}")
+                            yield json.dumps({"content": content})
+                except Exception as e:
+                    logging.error(f"Streaming failed: {e}")
+                    yield json.dumps({"error": str(e)})
 
-            # 🔁 await-им функцию, возвращающую генератор
-            async def run():
-                return self.make_request_with_retry(stream_model)
+            # ⬇️ важно — await результата retry-обёртки
+            async for item in self.make_request_with_retry(stream_model):
+                yield item
 
-            # 👇 запускаем асинхронный код и получаем итератор
-            return await run()
+                
+        class SyncIterator:
+            def __init__(self):
+                self._aiter = run_pipeline().__aiter__()
 
-        # 👉 запускаем всё это в asyncio.run
-        return asyncio.run(run_pipeline())
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                try:
+                    return asyncio.run(self._aiter.__anext__())
+                except StopAsyncIteration:
+                    raise StopIteration
+
+        return SyncIterator()
