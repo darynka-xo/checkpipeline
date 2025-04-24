@@ -49,15 +49,23 @@ class Pipeline:
                     raise
                 await asyncio.sleep(2 ** attempt)
 
-    def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Iterator[str]:
+    def pipe(self, user_message: str, model_id: str, messages: list, body: dict) -> Iterator[str]:
+        import asyncio
+        import json
+
         async def run_pipeline():
+            from langchain.embeddings import HuggingFaceEmbeddings
+            from langchain.vectorstores.pgvector import PGVector
+            from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+            from langchain_openai import ChatOpenAI
+
+            # Векторка
             embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
             vectorstore = PGVector(
-                connection_string=os.getenv("PGVECTOR_URL", "postgresql://admin:tester123@host.docker.internal:5432/postgres"),
+                connection_string=os.getenv("PGVECTOR_URL"),
                 collection_name="laws_chunks_ru",
-                embedding_function=embeddings
+                embedding_function=embeddings,
             )
-
             retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 5})
             docs = retriever.get_relevant_documents(user_message)
             legal_context = "\n\n".join([f"- {doc.page_content}" for doc in docs])
@@ -108,33 +116,29 @@ class Pipeline:
             ])
             formatted_messages = prompt.format_messages(user_input=user_message)
 
+            # Поток модели
             async def stream_model():
-                try:
-                    for chunk in model.stream(formatted_messages):
-                        content = getattr(chunk, "content", None)
-                        if content:
-                            logging.debug(f"Chunk: {content}")
-                            yield json.dumps({"content": content})
-                except Exception as e:
-                    logging.error(f"Streaming failed: {e}")
-                    yield json.dumps({"error": str(e)})
+                for chunk in model.stream(formatted_messages):
+                    content = getattr(chunk, "content", None)
+                    if content:
+                        yield json.dumps({"content": content})
 
-            # ⬇️ важно — await результата retry-обёртки
-            async for item in self.make_request_with_retry(stream_model):
+            # await self.make_request_with_retry(stream_model) правильно
+            async for item in await self.make_request_with_retry(stream_model):
                 yield item
 
-                
-        class SyncIterator:
+        # Обёртка чтобы сделать итератор для OpenWebUI
+        class SyncWrapper:
             def __init__(self):
-                self._aiter = run_pipeline().__aiter__()
+                self.iter = run_pipeline().__aiter__()
 
             def __iter__(self):
                 return self
 
             def __next__(self):
                 try:
-                    return asyncio.run(self._aiter.__anext__())
+                    return asyncio.run(self.iter.__anext__())
                 except StopAsyncIteration:
                     raise StopIteration
 
-        return SyncIterator()
+        return SyncWrapper()
