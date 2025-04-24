@@ -47,7 +47,7 @@ class Pipeline:
         embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
 
         vectorstore = PGVector(
-            connection_string=os.getenv("PGVECTOR_URL", "postgresql://admin:tester123@localhost:5432/postgres"),
+            connection_string=os.getenv("PGVECTOR_URL", "postgresql://admin:tester123@host.docker.internal:5432/postgres"),
             collection_name="laws_chunks_ru",
             embedding_function=embeddings
         )
