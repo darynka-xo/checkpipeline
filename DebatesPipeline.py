@@ -49,9 +49,7 @@ class Pipeline:
                     raise
                 await asyncio.sleep(2 ** attempt)
 
-    def pipe(
-    self, user_message: str, model_id: str, messages: List[dict], body: dict
-) -> Iterator[str]:
+    def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Iterator[str]:
         async def run_pipeline():
             embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
             vectorstore = PGVector(
@@ -121,8 +119,8 @@ class Pipeline:
         async def run():
             return self.make_request_with_retry(stream_model)
 
-        # 👇 запускаем асинхронный код и получаем итератор
-        return await run()
-
-    # 👉 запускаем всё это в asyncio.run
-    return asyncio.run(run_pipeline())
+            # 👇 запускаем асинхронный код и получаем итератор
+            return await run()
+    
+        # 👉 запускаем всё это в asyncio.run
+        return asyncio.run(run_pipeline())
