@@ -8,6 +8,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.vectorstores.pgvector import PGVector
+import json
 
 logging.basicConfig(
     level=logging.INFO,
@@ -111,10 +112,11 @@ class Pipeline:
 
         formatted_messages = prompt.format_messages(user_input=user_message)
 
-        def stream_model():
+        def stream_model() -> Iterator[str]:
             for chunk in model.stream(formatted_messages):
-                piece = (chunk.choices[0].delta.content or "").strip()
-                if piece:
-                    yield json.dumps({"role": "assistant", "content": piece})
+                content = getattr(chunk, "content", None)
+                if content:
+                    logging.debug(f"Model chunk: {content}")
+                    yield json.dumps({"content": content})
 
         return self.make_request_with_retry(stream_model)
