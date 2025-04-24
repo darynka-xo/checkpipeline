@@ -57,7 +57,7 @@ class Pipeline:
                 collection_name="laws_chunks_ru",
                 embedding_function=embeddings
             )
-    
+
             retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 5})
             docs = retriever.get_relevant_documents(user_message)
             legal_context = "\n\n".join([f"- {doc.page_content}" for doc in docs])
@@ -95,32 +95,32 @@ class Pipeline:
     - Стратегические советы для повышения убедительности
     """
 
-        model = ChatOpenAI(
-            api_key=self.valves.OPENAI_API_KEY,
-            model=self.valves.MODEL_ID,
-            temperature=self.valves.TEMPERATURE,
-            streaming=True
-        )
+            model = ChatOpenAI(
+                api_key=self.valves.OPENAI_API_KEY,
+                model=self.valves.MODEL_ID,
+                temperature=self.valves.TEMPERATURE,
+                streaming=True
+            )
 
-        prompt = ChatPromptTemplate.from_messages([
-            SystemMessagePromptTemplate.from_template(system_message),
-            HumanMessagePromptTemplate.from_template("{user_input}")
-        ])
-        formatted_messages = prompt.format_messages(user_input=user_message)
+            prompt = ChatPromptTemplate.from_messages([
+                SystemMessagePromptTemplate.from_template(system_message),
+                HumanMessagePromptTemplate.from_template("{user_input}")
+            ])
+            formatted_messages = prompt.format_messages(user_input=user_message)
 
-        def stream_model() -> Iterator[str]:
-            for chunk in model.stream(formatted_messages):
-                content = getattr(chunk, "content", None)
-                if content:
-                    logging.debug(f"Model chunk: {content}")
-                    yield json.dumps({"content": content})  # ✅ JSON для OpenWebUI
+            def stream_model() -> Iterator[str]:
+                for chunk in model.stream(formatted_messages):
+                    content = getattr(chunk, "content", None)
+                    if content:
+                        logging.debug(f"Model chunk: {content}")
+                        yield json.dumps({"content": content})  # ✅ JSON для OpenWebUI
 
-        # 🔁 await-им функцию, возвращающую генератор
-        async def run():
-            return self.make_request_with_retry(stream_model)
+            # 🔁 await-им функцию, возвращающую генератор
+            async def run():
+                return self.make_request_with_retry(stream_model)
 
             # 👇 запускаем асинхронный код и получаем итератор
             return await run()
-    
+
         # 👉 запускаем всё это в asyncio.run
         return asyncio.run(run_pipeline())
