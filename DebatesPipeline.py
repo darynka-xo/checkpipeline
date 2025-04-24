@@ -108,7 +108,7 @@ class Pipeline:
                 content = getattr(chunk, "content", None)
                 if content:
                     logging.debug(f"Model chunk: {content}")
-                    yield json.dumps({"text": content})
+                    yield content
 
 
         return asyncio.run(self.make_request_with_retry(stream_model))
