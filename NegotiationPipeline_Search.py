@@ -44,10 +44,7 @@ def search_kz_web(query: str) -> str:
             if title and snippet and link:
                 full_text = extract_text_from_url(link['href'])
                 summary = analyze_external_text(full_text, link['href'])
-                results.append(
-                    f"🔗 {title.text}\n{snippet.text}\n{link['href']}\n---\n{summary.strip()}\n"
-                )
-
+                results.append(f"🔗 {title.text}\n{snippet.text}\n{link['href']}\n---\n{summary.strip()}\n📎 Источник: {link['href']}\n")
 
         return "Результаты анализа внешних источников:\n\n" + "\n".join(results) if results else "Ничего не найдено на официальных источниках."
     except Exception as e:
@@ -78,14 +75,18 @@ def analyze_external_text(text: str, source_url: str) -> str:
         )
 
         messages = [
-            SystemMessage(content="Вы — эксперт по нормативной и экономической аналитике. Проанализируйте следующий текст и сделайте 2–3 ключевых вывода, каждый с коротким пояснением. В конце обязательно укажите источник в формате: [Источник: URL]."),
+            SystemMessage(content=f"""Вы — эксперт по нормативной и экономической аналитике. 
+Проанализируйте следующий текст и сделайте 2–3 ключевых вывода. 
+**Каждый вывод должен быть коротким и сопровождаться пояснением.**
+**В конце строго добавьте источник: {source_url}**. Без этого — ответ считается неполным."""),
             HumanMessage(content=text[:4000])
         ]
 
         result = model.invoke(messages)
-        return f"{result.content}\n[Источник: {source_url}]"
+        return f"{result.content}\n\n📎 Источник: {source_url}"
     except Exception as e:
         return f"[Ошибка анализа: {str(e)}]"
+
 
 
 class Pipeline:
