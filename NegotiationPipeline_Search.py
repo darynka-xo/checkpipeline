@@ -199,19 +199,17 @@ class Pipeline:
             tools=tools,
             verbose=True,
             handle_parsing_errors=True,
-            streaming=True,
+            streaming=True
         )
-    
-        # —---------- фильтр только строк —----------
-        def clean_stream() -> Iterator[str]:
+
+        def stream_agent() -> Iterator[str]:
             for chunk in agent_executor.stream({
                 "input": user_message,
-                "chat_history": messages,
+                "chat_history": messages
             }):
-                # langchain возвращает dict; нужен только финальный вывод
-                if isinstance(chunk, dict):
-                    output = chunk.get("output")
-                    if output:            # пустые шаги пропускаем
-                        yield output
-    
-        return clean_stream()
+                output = chunk.get("output")
+                if output:
+                    logging.debug(f"Agent chunk: {output}")
+                    yield output
+
+        return asyncio.run(self.make_request_with_retry(stream_agent))
