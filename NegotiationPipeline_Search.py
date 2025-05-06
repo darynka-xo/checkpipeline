@@ -25,9 +25,10 @@ def search_kz_web(query: str) -> str:
     """Поиск, парсинг и анализ содержимого казахстанских официальных источников."""
     try:
         trusted_sites = [
-            "site:adilet.zan.kz", "site:gov.kz", "site:egov.kz",
-            "site:nao.kz", "site:nbrk.kz", "site:kase.kz",
-            "site:primeminister.kz", "site:stat.gov.kz"
+            "site:senate.parlam.kz", "site:akorda.kz", "site:primeminister.kz",
+            "site:otyrys.prk.kz", "site:senate-zan.prk.kz",
+            "site:lib.prk.kz", "site:online.zakon.kz", "site:adilet.zan.kz",
+            "site:legalacts.egov.kz", "site:egov.kz", "site:eotinish.kz"
         ]
         query_with_sites = f"{query} " + " OR ".join(trusted_sites)
         url = f"https://www.google.com/search?q={requests.utils.quote(query_with_sites)}&hl=ru"
@@ -42,8 +43,11 @@ def search_kz_web(query: str) -> str:
             link = g.select_one("a")
             if title and snippet and link:
                 full_text = extract_text_from_url(link['href'])
-                summary = analyze_external_text(full_text)
-                results.append(f"🔗 {title.text}\n{snippet.text}\n{link['href']}\n---\n{summary}\n")
+                summary = analyze_external_text(full_text, link['href'])
+                results.append(
+                    f"🔗 {title.text}\n{snippet.text}\n{link['href']}\n---\n{summary.strip()}\n"
+                )
+
 
         return "Результаты анализа внешних источников:\n\n" + "\n".join(results) if results else "Ничего не найдено на официальных источниках."
     except Exception as e:
@@ -62,7 +66,7 @@ def extract_text_from_url(url: str) -> str:
         return f"[Ошибка при извлечении текста: {str(e)}]"
 
 
-def analyze_external_text(text: str) -> str:
+def analyze_external_text(text: str, source_url: str) -> str:
     try:
         if not text or "Ошибка" in text:
             return text
@@ -74,12 +78,12 @@ def analyze_external_text(text: str) -> str:
         )
 
         messages = [
-            SystemMessage(content="Вы — эксперт по нормативной и экономической аналитике. Проанализируйте следующий текст и выделите ключевые выводы, которые могут повлиять на стратегию переговоров или инвестиционную политику."),
+            SystemMessage(content="Вы — эксперт по нормативной и экономической аналитике. Проанализируйте следующий текст и сделайте 2–3 ключевых вывода, каждый с коротким пояснением. В конце обязательно укажите источник в формате: [Источник: URL]."),
             HumanMessage(content=text[:4000])
         ]
 
         result = model.invoke(messages)
-        return result.content
+        return f"{result.content}\n[Источник: {source_url}]"
     except Exception as e:
         return f"[Ошибка анализа: {str(e)}]"
 
