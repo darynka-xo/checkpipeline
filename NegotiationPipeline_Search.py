@@ -36,19 +36,27 @@ def search_kz_web(query: str) -> str:
         html = requests.get(url, headers=headers, timeout=10).text
         soup = BeautifulSoup(html, "html.parser")
 
-        results = []
+        sources = []
         for g in soup.select(".tF2Cxc")[:3]:
             title = g.select_one("h3")
-            snippet = g.select_one(".VwiC3b")
             link = g.select_one("a")
-            if title and snippet and link:
-                full_text = extract_text_from_url(link['href'])
-                summary = analyze_external_text(full_text, link['href'])
-                results.append(f"🔗 {title.text}\n{snippet.text}\n{link['href']}\n---\n{summary.strip()}\n📎 Источник: {link['href']}\n")
+            if title and link:
+                page_url = link["href"]
+                page_text = extract_text_from_url(page_url)
+                sources.append({
+                    "title": title.text,
+                    "url": page_url,
+                    "text": page_text
+                })
 
-        return "Результаты анализа внешних источников:\n\n" + "\n".join(results) if results else "Ничего не найдено на официальных источниках."
+        if not sources:
+            return "Ничего не найдено на официальных источниках."
+
+        summary = analyze_multiple_sources(sources)
+        return "📊 Анализ источников:\n\n" + summary
     except Exception as e:
         return f"Ошибка поиска: {str(e)}"
+
 
 
 def extract_text_from_url(url: str) -> str:
@@ -87,6 +95,37 @@ def analyze_external_text(text: str, source_url: str) -> str:
     except Exception as e:
         return f"[Ошибка анализа: {str(e)}]"
 
+def analyze_multiple_sources(sources: List[dict]) -> str:
+    try:
+        model = ChatOpenAI(
+            api_key=os.getenv("OPENAI_API_KEY", ""),
+            model="gpt-4o",
+            temperature=0.5
+        )
+
+        # Объединяем 2–3 источника с заголовком и текстом
+        combined_chunks = []
+        for src in sources[:3]:
+            clean_text = src['text'][:1000].strip()
+            if clean_text:
+                combined_chunks.append(f"[Источник: {src['url']}]\n{clean_text}")
+
+        combined_text = "\n\n".join(combined_chunks)
+
+        messages = [
+            SystemMessage(content="""
+Вы — эксперт по переговорам и стратегическому управлению.
+Ниже представлены выдержки из официальных источников.
+На их основе сделайте 2–3 ключевых вывода, каждый с пояснением. 
+📎 Обязательно ссылайтесь на конкретный источник в формате [Источник: URL] после каждого вывода.
+"""),
+            HumanMessage(content=combined_text)
+        ]
+
+        result = model.invoke(messages)
+        return result.content
+    except Exception as e:
+        return f"[Ошибка анализа: {str(e)}]"
 
 
 class Pipeline:
