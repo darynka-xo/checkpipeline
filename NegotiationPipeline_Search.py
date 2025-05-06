@@ -220,26 +220,32 @@ class Pipeline:
     
         def stream_agent() -> Iterator[str]:
             collected_output = ""
+        
             for chunk in agent_executor.stream({
                 "input": user_message,
                 "chat_history": messages
             }):
-                output = chunk.get("output")
+                print("DEBUG CHUNK:", chunk)  # для отладки
+        
+                output = None
+                if "output" in chunk:
+                    output = chunk["output"]
+                elif "final_output" in chunk:
+                    output = chunk["final_output"]
+        
                 if output:
                     logging.debug(f"Agent chunk: {output}")
                     collected_output += output
                     yield output
         
-            # Если нет ссылок в ответе — добавить вручную
+            # Постобработка, если нет ссылок
             if "Источник:" not in collected_output and "📎" not in collected_output:
                 yield "\n\n📎 Добавлены источники по теме:\n"
-        
-                # 👉 Форсированный вызов инструмента как post-processing
                 try:
                     search_result = search_kz_web.run({"query": user_message})
-                    summary = f"\n\n📎 Топ 2–3 источника по теме:\n{search_result}"
-                    yield summary
+                    yield f"\n\n📎 Топ 2–3 источника по теме:\n{search_result}"
                 except Exception as e:
                     yield f"\n[Ошибка получения ссылок: {e}]"
+
 
 
