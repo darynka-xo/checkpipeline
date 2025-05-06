@@ -229,9 +229,17 @@ class Pipeline:
                     logging.debug(f"Agent chunk: {output}")
                     collected_output += output
                     yield output
-    
+        
+            # Если нет ссылок в ответе — добавить вручную
             if "Источник:" not in collected_output and "📎" not in collected_output:
-                yield "\n\n⚠️ Источник не указан. Уточните, откуда взята информация."
-    
-        return asyncio.run(self.make_request_with_retry(stream_agent))
+                yield "\n\n📎 Добавлены источники по теме:\n"
+        
+                # 👉 Форсированный вызов инструмента как post-processing
+                try:
+                    search_result = search_kz_web.run({"query": user_message})
+                    summary = f"\n\n📎 Топ 2–3 источника по теме:\n{search_result}"
+                    yield summary
+                except Exception as e:
+                    yield f"\n[Ошибка получения ссылок: {e}]"
+
 
