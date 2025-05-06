@@ -199,11 +199,19 @@ class Pipeline:
             tools=tools,
             verbose=True,
             handle_parsing_errors=True,
-            streaming=True
+            streaming=True,
         )
     
-        # напрямую прокидываем генератор OpenWebUI
-        return agent_executor.stream({
-            "input": user_message,
-            "chat_history": messages
-        })
+        # —---------- фильтр только строк —----------
+        def clean_stream() -> Iterator[str]:
+            for chunk in agent_executor.stream({
+                "input": user_message,
+                "chat_history": messages,
+            }):
+                # langchain возвращает dict; нужен только финальный вывод
+                if isinstance(chunk, dict):
+                    output = chunk.get("output")
+                    if output:            # пустые шаги пропускаем
+                        yield output
+    
+        return clean_stream()
