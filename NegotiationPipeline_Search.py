@@ -2,17 +2,28 @@ import logging
 import sys
 import os
 import asyncio
-from typing import List, Iterator, Callable, Any, Dict, Optional, Union, AsyncIterator
-from pydantic import BaseModel
+import json
+import aiohttp
+from typing import List, Iterator, Callable, Any, Dict, Optional
+from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.prompts import SystemMessagePromptTemplate, HumanMessagePromptTemplate
-import json
-import httpx
-import re
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
+
+
+class SearchResult(BaseModel):
+    title: str
+    link: str
+    snippet: str
+    position: int
+
+
+class SearchResponse(BaseModel):
+    results: List[SearchResult] = Field(default_factory=list)
+    error: Optional[str] = None
 
 
 class Pipeline:
@@ -21,10 +32,10 @@ class Pipeline:
         TEMPERATURE: float = 0.7
         MAX_TOKENS: int = 1500
         OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-        SERPER_API_KEY: str = os.getenv("SERPER_API_KEY", "")  # API ключ для Serper.dev
+        SERPER_API_KEY: str = os.getenv("SERPER_API_KEY", "")
 
     def __init__(self):
-        self.name = "Negotiation Strategy Predictor with Evidence"
+        self.name = "Negotiation Strategy Predictor"
         self.valves = self.Valves()
         self.trusted_sites = [
             "site:senate.parlam.kz", "site:akorda.kz", "site:primeminister.kz",
@@ -39,190 +50,94 @@ class Pipeline:
     async def on_shutdown(self):
         logging.info("Pipeline is shutting down...")
 
-    async def make_request_with_retry(
-            self,
-            fn: Callable[[], AsyncIterator[str]],
-            retries: int = 3,
-    ) -> AsyncIterator[str]:
+    async def make_request_with_retry(self, fn: Callable[[], Iterator[str]], retries=3) -> Iterator[str]:
         for attempt in range(retries):
             try:
-                return fn()  # теперь это AsyncIterator
+                return fn()
             except Exception as e:
                 logging.error(f"Attempt {attempt + 1} failed: {e}")
                 if attempt + 1 == retries:
                     raise
                 await asyncio.sleep(2 ** attempt)
 
-    async def search_web(self, query: str, num_results: int = 5) -> List[Dict]:
+    async def search_web(self, query: str, num_results: int = 3) -> SearchResponse:
         """
-        Выполняет поиск в интернете с использованием Serper API с фокусом на доверенные источники.
+        Perform a web search with the Serper API, focusing on trusted sites.
         """
-        # Подготовка запросов для поиска по каждому доверенному сайту
-        search_queries = []
+        # Generate site restriction using OR operator for trusted sites
+        site_filter = " OR ".join(self.trusted_sites)
+        enhanced_query = f"{query} ({site_filter})"
 
-        # Сначала добавляем общий запрос без ограничений по сайтам
-        search_queries.append(query)
+        logging.info(f"Searching for: {enhanced_query}")
 
-        # Затем добавляем запросы для каждого доверенного сайта
-        for site in self.trusted_sites:
-            site_query = f"{query} {site}"
-            search_queries.append(site_query)
+        url = "https://google.serper.dev/search"
 
-        all_results = []
+        headers = {
+            'X-API-KEY': self.valves.SERPER_API_KEY,
+            'Content-Type': 'application/json'
+        }
 
-        # Выполняем запросы последовательно
-        for search_query in search_queries:
-            logging.info(f"Выполняем поиск: {search_query}")
+        payload = {
+            'q': enhanced_query,
+            'gl': 'kz',  # Kazakhstan geolocation
+            'hl': 'ru',  # Russian language
+            'num': num_results
+        }
 
-            try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.post(
-                        "https://google.serper.dev/search",
-                        headers={
-                            "X-API-KEY": self.valves.SERPER_API_KEY,
-                            "Content-Type": "application/json"
-                        },
-                        json={
-                            "q": search_query,
-                            "gl": "kz",  # Геолокация - Казахстан
-                            "hl": "ru",  # Язык - русский
-                            "num": 3  # Уменьшаем количество результатов для каждого запроса
-                        }
-                    )
-
-                    if response.status_code != 200:
-                        logging.error(f"Ошибка API поиска: {response.status_code}, {response.text}")
-                        continue
-
-                    search_results = response.json()
-
-                    # Извлекаем и форматируем результаты
-                    if "organic" in search_results:
-                        for result in search_results["organic"]:
-                            # Создаем уникальный идентификатор для результата
-                            result_id = result.get("link", "")
-
-                            # Проверяем, нет ли уже этого результата в списке
-                            if not any(r["link"] == result_id for r in all_results):
-                                # Проверяем, является ли источник доверенным
-                                domain = self.extract_domain(result_id)
-                                is_trusted = any(
-                                    trusted_site.split(":")[1] in domain for trusted_site in self.trusted_sites)
-
-                                # Добавляем результат в общий список
-                                all_results.append({
-                                    "index": len(all_results),
-                                    "title": result.get("title", ""),
-                                    "link": result_id,
-                                    "snippet": result.get("snippet", ""),
-                                    "source": domain,
-                                    "is_trusted": is_trusted
-                                })
-
-                    # Не делаем слишком много запросов подряд
-                    await asyncio.sleep(0.5)
-
-            except Exception as e:
-                logging.error(f"Ошибка при выполнении поиска: {str(e)}")
-
-        # Сортируем результаты: сначала доверенные источники
-        all_results.sort(key=lambda x: (not x.get("is_trusted"), x.get("index")))
-
-        # Обновляем индексы после сортировки
-        for i, result in enumerate(all_results):
-            result["index"] = i + 1  # Начинаем индексацию с 1 для удобства пользователя
-
-        # Возвращаем ограниченное количество результатов
-        return all_results[:num_results]
-
-    def extract_domain(self, url: str) -> str:
-        """Извлекает домен из URL."""
-        match = re.search(r'https?://(?:www\.)?([^/]+)', url)
-        if match:
-            return match.group(1)
-        return url
-
-    async def fetch_page_content(self, url: str) -> str:
-        """
-        Получает содержимое веб-страницы по URL.
-        """
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url, timeout=10.0)
-                if response.status_code == 200:
-                    # Можно добавить парсинг HTML, чтобы извлечь чистый текст
-                    return response.text
-                else:
-                    logging.error(f"Failed to fetch content from {url}: {response.status_code}")
-                    return ""
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=payload) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logging.error(f"Search API returned status {response.status}: {error_text}")
+                        return SearchResponse(error=f"Search API error: {response.status}")
+
+                    data = await response.json()
+
+                    # Parse organic results
+                    results = []
+                    if 'organic' in data:
+                        for i, item in enumerate(data['organic']):
+                            results.append(SearchResult(
+                                title=item.get('title', 'No Title'),
+                                link=item.get('link', ''),
+                                snippet=item.get('snippet', 'No snippet available'),
+                                position=i + 1
+                            ))
+
+                    return SearchResponse(results=results)
+
         except Exception as e:
-            logging.error(f"Error fetching page content: {e}")
-            return ""
+            logging.error(f"Error during web search: {str(e)}")
+            return SearchResponse(error=f"Search failed: {str(e)}")
 
-    def format_search_results_for_prompt(self, results: List[Dict]) -> str:
+    def format_search_results(self, search_response: SearchResponse) -> str:
         """
-        Форматирует результаты поиска для включения в промпт.
-        Каждый результат представлен в виде структурированного текста с уникальным индексом.
+        Format search results for inclusion in the system prompt.
         """
-        if not results:
-            return "Информация из доверенных источников не найдена."
+        if search_response.error:
+            return f"Поиск не удался с ошибкой: {search_response.error}"
 
-        formatted_text = "### Информация из доверенных источников:\n\n"
+        if not search_response.results:
+            return "Поиск не дал результатов. Используйте только имеющиеся у вас знания."
 
-        for result in results:
-            index = result['index']
-            title = result.get('title', 'Заголовок не указан')
-            source = result.get('source', 'Источник не указан')
-            link = result.get('link', '#')
-            snippet = result.get('snippet', 'Описание отсутствует')
+        results_text = "### Результаты поиска из проверенных источников:\n\n"
 
-            # Разбиваем снипет на предложения для удобства цитирования
-            sentences = re.split(r'(?<=[.!?])\s+', snippet)
-            sentences_text = ""
+        for i, result in enumerate(search_response.results):
+            results_text += f"**Источник {i + 1}: {result.title}**\n"
+            results_text += f"URL: {result.link}\n"
+            results_text += f"Содержание: {result.snippet}\n\n"
 
-            for i, sentence in enumerate(sentences):
-                if sentence.strip():  # Пропускаем пустые предложения
-                    sentences_text += f"{index}-{i + 1}: {sentence.strip()}\n"
+        results_text += "При использовании информации из источников, обязательно укажите номер источника в скобках, например: [Источник 1].\n\n"
 
-            formatted_text += f"[{index}] {title}\n"
-            formatted_text += f"Источник: {source}\n"
-            formatted_text += f"Ссылка: {link}\n"
-            formatted_text += f"Текст:\n{sentences_text}\n"
-
-        return formatted_text
-
-    def create_citation_instructions(self) -> str:
-        """
-        Создает инструкции по цитированию для включения в системный промпт.
-        """
-        return """
-**Цитирование источников:**
-
-Всегда подкрепляйте свои ключевые утверждения и рекомендации цитатами из доверенных источников.
-Используйте следующий формат цитирования:
-
-- Для прямых цитат: "Прямая цитата" [Номер источника]
-- Для перефразирования: Перефразированная информация [Номер источника]
-
-В конце ответа укажите список использованных источников в формате:
-
-**Источники:**
-[1] Название источника, URL
-[2] Название источника, URL
-...
-
-Если для ответа на вопрос пользователя нет достаточной информации в предоставленных источниках, 
-укажите это и используйте свои знания, но отметьте, что эта часть ответа не подтверждена 
-официальными источниками Казахстана.
-"""
+        return results_text
 
     async def pipe(
             self, user_message: str, model_id: str, messages: List[dict], body: dict
-    ) -> AsyncIterator[str]:
-
-        # Выполняем поиск по запросу пользователя
-        search_results = await self.search_web(user_message)
-        search_content = self.format_search_results_for_prompt(search_results)
+    ) -> Iterator[str]:
+        # First, perform web search based on user query
+        search_response = await self.search_web(user_message)
+        search_results_text = self.format_search_results(search_response)
 
         system_message = """
 **Роль:** Вы — эксперт по переговорам и стратегическому управлению. Ваша специализация — анализ и прогнозирование успешности различных моделей ведения переговоров, каналов коммуникации, а также построение компромиссных стратегий для разрешения конфликтов. Вы работаете строго в рамках переговорной аналитики, без отклонений в политические, бытовые, философские или технические темы.
@@ -231,41 +146,42 @@ class Pipeline:
 Вы не отвечаете на вопросы, которые не касаются переговорных ситуаций, конфликтов интересов между сторонами, выбора стратегий убеждения, построения аргументов или оценки компромиссных решений. Если пользователь задаёт нерелевантный запрос, вы мягко перенаправляете его и предлагаете сформулировать переговорную ситуацию или проблему, с которой вы можете помочь.
 
 **Пример реакции на нерелевантный вопрос:**
-
 > «Прошу прощения, моя компетенция ограничена анализом переговоров, стратегий компромисса и оценки успешности коммуникационных моделей. Могу ли я помочь вам с анализом конкретной переговорной ситуации или конфликта интересов?»
 
 **Цель:**
-
 1. Анализировать представленные конфликтные или сложные переговорные ситуации.
 2. Предлагать эффективные, взвешенные и компромиссные решения.
 3. Прогнозировать успешность каждой переговорной модели с точки зрения устойчивости, выгод для сторон и долгосрочного эффекта.
 
+**Источники информации:**
+Используйте предоставленные результаты поиска для обогащения ваших ответов. Обязательно цитируйте источники в вашем ответе, используя формат [Источник X], где X - номер источника.
+
+{search_results}
+
 **Структура ответа:**
 
 ### 1. Возможные компромиссные решения
-
-* Конкретные, практически реализуемые предложения, учитывающие интересы обеих сторон.
+- Конкретные, практически реализуемые предложения, учитывающие интересы обеих сторон.
 
 ### 2. Прогноз эффективности
-
-* Оценка каждой предложенной модели или решения по таким критериям, как: устойчивость, масштабируемость, риски, потенциал реализации.
+- Оценка каждой предложенной модели или решения по таким критериям, как: устойчивость, масштабируемость, риски, потенциал реализации.
 
 ### 3. Рекомендации
+- Какая модель наилучшим образом подойдёт в данной ситуации и почему.
+- Уточняющие вопросы при необходимости.
 
-* Какая модель наилучшим образом подойдёт в данной ситуации и почему.
-* Уточняющие вопросы при необходимости.
+### 4. Использованные источники
+- Перечислите номера и названия использованных источников.
 """
-
-        # Добавляем инструкции по цитированию и результаты поиска
-        system_message += self.create_citation_instructions()
-        system_message += f"\n\n{search_content}"
+        # Insert search results into system message
+        system_message = system_message.format(search_results=search_results_text)
 
         model = ChatOpenAI(
             api_key=self.valves.OPENAI_API_KEY,
-            model=self.valves.MODEL_ID,
+            model=self.valves.MODEL_ID if not model_id else model_id,
             temperature=self.valves.TEMPERATURE,
-            streaming=True,
-            max_tokens=self.valves.MAX_TOKENS
+            max_tokens=self.valves.MAX_TOKENS,
+            streaming=True
         )
 
         prompt = ChatPromptTemplate.from_messages([
@@ -275,8 +191,8 @@ class Pipeline:
 
         formatted_messages = prompt.format_messages(user_input=user_message)
 
-        async def generate_stream() -> AsyncIterator[str]:
-            async for chunk in model.astream(formatted_messages):
+        def generate_stream() -> Iterator[str]:
+            for chunk in model.stream(formatted_messages):
                 content = getattr(chunk, "content", None)
                 if content:
                     logging.debug(f"Model chunk: {content}")
