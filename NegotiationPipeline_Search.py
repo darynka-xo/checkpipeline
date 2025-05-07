@@ -4,7 +4,7 @@ import os
 import asyncio
 import json
 import aiohttp
-from typing import List, Iterator, Callable, Any, Dict, Optional, Union
+from typing import List, Dict, Optional, Any
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -122,15 +122,13 @@ class Pipeline:
 
         return results_text
 
-    async def pipe(
-            self, user_message: str, model_id: str = None, messages: List[dict] = None, body: dict = None
-    ) -> Union[str, Iterator[str]]:
+    async def pipe(self, user_message: str, model_id: str = None, messages: List[dict] = None,
+                   body: dict = None) -> str:
         """
-        Main pipeline function that processes user input and returns model response.
-        For OpenWebUI, this method needs to handle both streaming and non-streaming responses.
+        Простая версия без стриминга, возвращающая полный ответ сразу
         """
         try:
-            # First, perform web search based on user query
+            # Выполняем поиск на основе запроса пользователя
             search_response = await self.search_web(user_message)
             search_results_text = self.format_search_results(search_response)
 
@@ -168,15 +166,16 @@ class Pipeline:
 ### 4. Использованные источники
 - Перечислите номера и названия использованных источников.
 """
-            # Insert search results into system message
+            # Вставляем результаты поиска в системное сообщение
             system_message = system_message.format(search_results=search_results_text)
 
+            # Инициализируем модель без стриминга
             model = ChatOpenAI(
                 api_key=self.valves.OPENAI_API_KEY,
                 model=self.valves.MODEL_ID if not model_id else model_id,
                 temperature=self.valves.TEMPERATURE,
                 max_tokens=self.valves.MAX_TOKENS,
-                streaming=True
+                streaming=False  # Отключаем стриминг
             )
 
             prompt = ChatPromptTemplate.from_messages([
@@ -186,60 +185,31 @@ class Pipeline:
 
             formatted_messages = prompt.format_messages(user_input=user_message)
 
-            # Check if streaming is needed
-            if body and body.get("stream", False):
-                # For streaming responses
-                async def async_generator():
-                    for chunk in model.stream(formatted_messages):
-                        content = getattr(chunk, "content", None)
-                        if content:
-                            logging.debug(f"Model chunk: {content}")
-                            yield content
+            # Получаем полный ответ сразу
+            response = model.invoke(formatted_messages)
+            full_response = response.content
 
-                return async_generator()
-            else:
-                # For non-streaming responses (collect all chunks)
-                full_response = ""
-                for chunk in model.stream(formatted_messages):
-                    content = getattr(chunk, "content", None)
-                    if content:
-                        logging.debug(f"Model chunk: {content}")
-                        full_response += content
-
-                return full_response
+            logging.info("Got complete response")
+            return full_response
 
         except Exception as e:
             logging.error(f"Error in pipeline: {str(e)}")
             return f"Извините, произошла ошибка при обработке запроса: {str(e)}"
 
 
-# This function is needed to properly handle the pipeline within OpenWebUI
+# Эта функция нужна для правильной обработки pipeline в OpenWebUI
 async def filter_inlet(body, context):
     pipeline = Pipeline()
     await pipeline.on_startup()
 
-    stream = body.get("stream", False)
     user_message = body.get("prompt", "")
     model_id = body.get("model", None)
     messages = body.get("messages", [])
 
-    logging.info(f"stream:{stream}")
-
-    # For streaming responses
-    if stream:
-        async def generate():
-            try:
-                async for chunk in await pipeline.pipe(user_message, model_id, messages, body):
-                    yield chunk
-            except Exception as e:
-                logging.error(f"Error in generate: {str(e)}")
-                yield f"Error: {str(e)}"
-
-        return generate()
-
-    # For non-streaming responses
     try:
+        # Просто получаем полный ответ
         response = await pipeline.pipe(user_message, model_id, messages, body)
+        logging.info("Full response generated")
         return response
     except Exception as e:
         logging.error(f"Error in filter_inlet: {str(e)}")
