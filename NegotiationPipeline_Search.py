@@ -2,13 +2,14 @@ import logging
 import sys
 import os
 import asyncio
-from typing import List, Iterator, Callable, Any
+from typing import List, Iterator, Callable, Any, Dict, Optional, Union
 from pydantic import BaseModel
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.prompts import SystemMessagePromptTemplate, HumanMessagePromptTemplate
-from bs4 import BeautifulSoup
-import requests
+import json
+import httpx
+import re
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
@@ -19,10 +20,17 @@ class Pipeline:
         TEMPERATURE: float = 0.7
         MAX_TOKENS: int = 1500
         OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-
+        SERPER_API_KEY: str = os.getenv("SERPER_API_KEY", "")  # API ключ для Serper.dev
+        
     def __init__(self):
-        self.name = "Negotiation Strategy Predictor"
+        self.name = "Negotiation Strategy Predictor with Evidence"
         self.valves = self.Valves()
+        self.trusted_sites = [
+            "site:senate.parlam.kz", "site:akorda.kz", "site:primeminister.kz",
+            "site:otyrys.prk.kz", "site:senate-zan.prk.kz",
+            "site:lib.prk.kz", "site:online.zakon.kz", "site:adilet.zan.kz",
+            "site:legalacts.egov.kz", "site:egov.kz", "site:eotinish.kz"
+        ]
 
     async def on_startup(self):
         logging.info("Pipeline is warming up...")
@@ -39,67 +47,146 @@ class Pipeline:
                 if attempt + 1 == retries:
                     raise
                 await asyncio.sleep(2 ** attempt)
+    
+    async def search_web(self, query: str, num_results: int = 5) -> List[Dict]:
+        """
+        Выполняет поиск в интернете с использованием Serper API.
+        """
+        # Добавляем доверенные сайты в запрос
+        trusted_sites_query = " OR ".join(self.trusted_sites)
+        if trusted_sites_query:
+            enriched_query = f"{query} ({trusted_sites_query})"
+        else:
+            enriched_query = query
+            
+        logging.info(f"Searching for: {enriched_query}")
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://google.serper.dev/search",
+                    headers={
+                        "X-API-KEY": self.valves.SERPER_API_KEY,
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "q": enriched_query,
+                        "gl": "kz",  # Геолокация - Казахстан
+                        "hl": "ru",  # Язык - русский
+                        "num": num_results
+                    }
+                )
+                
+                if response.status_code != 200:
+                    logging.error(f"Search API error: {response.text}")
+                    return []
+                
+                search_results = response.json()
+                
+                # Извлекаем и форматируем результаты
+                formatted_results = []
+                if "organic" in search_results:
+                    for i, result in enumerate(search_results["organic"]):
+                        formatted_results.append({
+                            "index": i,
+                            "title": result.get("title", ""),
+                            "link": result.get("link", ""),
+                            "snippet": result.get("snippet", ""),
+                            "source": self.extract_domain(result.get("link", ""))
+                        })
+                        
+                return formatted_results
+                
+        except Exception as e:
+            logging.error(f"Error during web search: {e}")
+            return []
+    
+    def extract_domain(self, url: str) -> str:
+        """Извлекает домен из URL."""
+        match = re.search(r'https?://(?:www\.)?([^/]+)', url)
+        if match:
+            return match.group(1)
+        return url
+    
+    async def fetch_page_content(self, url: str) -> str:
+        """
+        Получает содержимое веб-страницы по URL.
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, timeout=10.0)
+                if response.status_code == 200:
+                    # Можно добавить парсинг HTML, чтобы извлечь чистый текст
+                    return response.text
+                else:
+                    logging.error(f"Failed to fetch content from {url}: {response.status_code}")
+                    return ""
+        except Exception as e:
+            logging.error(f"Error fetching page content: {e}")
+            return ""
+    
+    def format_search_results_for_prompt(self, results: List[Dict]) -> str:
+        """
+        Форматирует результаты поиска для включения в промпт.
+        """
+        if not results:
+            return "Информация из доверенных источников не найдена."
+            
+        formatted_text = "### Информация из доверенных источников:\n\n"
+        
+        for result in results:
+            formatted_text += f"[{result['index']}] {result['title']}\n"
+            formatted_text += f"Источник: {result['source']}\n"
+            formatted_text += f"Ссылка: {result['link']}\n"
+            formatted_text += f"Текст: {result['snippet']}\n\n"
+            
+        return formatted_text
+    
+    def create_citation_instructions(self) -> str:
+        """
+        Создает инструкции по цитированию для включения в системный промпт.
+        """
+        return """
+**Цитирование источников:**
 
-    trusted_sites = [
-        "site:senate.parlam.kz", "site:akorda.kz", "site:primeminister.kz",
-        "site:otyrys.prk.kz", "site:senate-zan.prk.kz", "site:lib.prk.kz",
-        "site:online.zakon.kz", "site:adilet.zan.kz", "site:legalacts.egov.kz",
-        "site:egov.kz", "site:eotinish.kz"
-    ]
+Всегда подкрепляйте свои ключевые утверждения и рекомендации цитатами из доверенных источников.
+Используйте следующий формат цитирования:
 
-    def search_trusted_web(self, query: str, max_sources=3) -> List[tuple[str, str]]:
-        # 1. Формируем поисковый запрос
-        search_query = f'{query} ' + ' OR '.join(self.trusted_sites)
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(f"https://www.google.com/search?q={search_query}", headers=headers)
-        soup = BeautifulSoup(response.text, "html.parser")
+- Для прямых цитат: "Прямая цитата" [Номер источника]
+- Для перефразирования: Перефразированная информация [Номер источника]
 
-        urls = []
-        for a in soup.select("a"):
-            href = a.get("href")
-            if href and "/url?q=" in href:
-                url = href.split("/url?q=")[1].split("&")[0]
-                if any(domain in url for domain in [s.split(":")[1] for s in self.trusted_sites]):
-                    urls.append(url)
-            if len(urls) >= max_sources:
-                break
+В конце ответа укажите список использованных источников в формате:
 
-        results = []
-        for url in urls:
-            try:
-                page = requests.get(url, headers=headers, timeout=5)
-                page_soup = BeautifulSoup(page.text, "html.parser")
-                for tag in page_soup(["script", "style"]):
-                    tag.extract()
-                text = page_soup.get_text(separator="\n")
-                cleaned = "\n".join([line.strip() for line in text.splitlines() if len(line.strip()) > 40])
-                results.append((url, cleaned[:1500]))  # ограничим до 1500 символов
-            except Exception as e:
-                logging.warning(f"Failed to parse {url}: {e}")
-                continue
-        return results
+**Источники:**
+[1] Название источника, URL
+[2] Название источника, URL
+...
 
-    def pipe(
+Если для ответа на вопрос пользователя нет достаточной информации в предоставленных источниках, 
+укажите это и используйте свои знания, но отметьте, что эта часть ответа не подтверждена 
+официальными источниками Казахстана.
+"""
+
+    async def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict
     ) -> Iterator[str]:
-        search_results = self.search_trusted_web(user_message)
-
-        if not search_results:
-            yield "Не удалось найти релевантную информацию на доверенных сайтах. Пожалуйста, уточните запрос."
-            return
-
-        web_context = "\n\n".join([f"Источник: {url}\n{text}" for url, text in search_results])
-
-        system_message = f"""
+        
+        # Выполняем поиск по запросу пользователя
+        search_results = await self.search_web(user_message)
+        search_content = self.format_search_results_for_prompt(search_results)
+        
+        system_message = """
 **Роль:** Вы — эксперт по переговорам и стратегическому управлению. Ваша специализация — анализ и прогнозирование успешности различных моделей ведения переговоров, каналов коммуникации, а также построение компромиссных стратегий для разрешения конфликтов. Вы работаете строго в рамках переговорной аналитики, без отклонений в политические, бытовые, философские или технические темы.
 
 **Область ответственности:**
 Вы не отвечаете на вопросы, которые не касаются переговорных ситуаций, конфликтов интересов между сторонами, выбора стратегий убеждения, построения аргументов или оценки компромиссных решений. Если пользователь задаёт нерелевантный запрос, вы мягко перенаправляете его и предлагаете сформулировать переговорную ситуацию или проблему, с которой вы можете помочь.
 
 **Пример реакции на нерелевантный вопрос:**
+
 > «Прошу прощения, моя компетенция ограничена анализом переговоров, стратегий компромисса и оценки успешности коммуникационных моделей. Могу ли я помочь вам с анализом конкретной переговорной ситуации или конфликта интересов?»
 
 **Цель:**
+
 1. Анализировать представленные конфликтные или сложные переговорные ситуации.
 2. Предлагать эффективные, взвешенные и компромиссные решения.
 3. Прогнозировать успешность каждой переговорной модели с точки зрения устойчивости, выгод для сторон и долгосрочного эффекта.
@@ -107,28 +194,29 @@ class Pipeline:
 **Структура ответа:**
 
 ### 1. Возможные компромиссные решения
-- Конкретные, практически реализуемые предложения, учитывающие интересы обеих сторон.
+
+* Конкретные, практически реализуемые предложения, учитывающие интересы обеих сторон.
 
 ### 2. Прогноз эффективности
-- Оценка каждой предложенной модели или решения по таким критериям, как: устойчивость, масштабируемость, риски, потенциал реализации.
+
+* Оценка каждой предложенной модели или решения по таким критериям, как: устойчивость, масштабируемость, риски, потенциал реализации.
 
 ### 3. Рекомендации
-- Какая модель наилучшим образом подойдёт в данной ситуации и почему.
-- Уточняющие вопросы при необходимости.
 
-**Дополнительные материалы:**
-Вот выдержки из доверенных казахстанских источников, которые могут помочь в анализе:
-
-{web_context}
-
-На их основе сделайте анализ ситуации, обязательно указывая источники.
+* Какая модель наилучшим образом подойдёт в данной ситуации и почему.
+* Уточняющие вопросы при необходимости.
 """
+
+        # Добавляем инструкции по цитированию и результаты поиска
+        system_message += self.create_citation_instructions()
+        system_message += f"\n\n{search_content}"
 
         model = ChatOpenAI(
             api_key=self.valves.OPENAI_API_KEY,
             model=self.valves.MODEL_ID,
             temperature=self.valves.TEMPERATURE,
-            streaming=True
+            streaming=True,
+            max_tokens=self.valves.MAX_TOKENS
         )
 
         prompt = ChatPromptTemplate.from_messages([
@@ -146,4 +234,4 @@ class Pipeline:
                     yield content
 
         # Wrap with retry logic
-        return asyncio.run(self.make_request_with_retry(generate_stream))
+        return await self.make_request_with_retry(generate_stream)
