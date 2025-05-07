@@ -146,4 +146,4 @@ class Pipeline:
                     yield content
 
         # Wrap with retry logic
-        return asyncio.run(self.make_request_with_retry(generate_stream))
+        return self.make_request_with_retry(generate_stream)
