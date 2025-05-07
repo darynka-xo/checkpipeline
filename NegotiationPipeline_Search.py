@@ -2,140 +2,16 @@ import logging
 import sys
 import os
 import asyncio
-import requests
-from bs4 import BeautifulSoup
-from typing import List, Iterator, Sequence, Callable
-from pydantic import BaseModel, Field
+from typing import List, Iterator, Callable, Any
+from pydantic import BaseModel
 from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.tools import tool, BaseTool
-from langchain.agents import create_tool_calling_agent, AgentExecutor
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from bs4 import BeautifulSoup
+import requests
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
-
-
-class WebSearchInput(BaseModel):
-    query: str = Field(description="Запрос для поиска в интернете")
-
-
-@tool("search_kz_web", args_schema=WebSearchInput, return_direct=False)
-def search_kz_web(query: str) -> str:
-    """Поиск, парсинг и анализ содержимого казахстанских официальных источников."""
-    try:
-        trusted_sites = [
-            "site:senate.parlam.kz", "site:akorda.kz", "site:primeminister.kz",
-            "site:otyrys.prk.kz", "site:senate-zan.prk.kz",
-            "site:lib.prk.kz", "site:online.zakon.kz", "site:adilet.zan.kz",
-            "site:legalacts.egov.kz", "site:egov.kz", "site:eotinish.kz"
-        ]
-        query_with_sites = f"{query} " + " OR ".join(trusted_sites)
-        url = f"https://www.google.com/search?q={requests.utils.quote(query_with_sites)}&hl=ru"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        html = requests.get(url, headers=headers, timeout=10).text
-        soup = BeautifulSoup(html, "html.parser")
-
-        sources = []
-        for g in soup.select(".tF2Cxc")[:3]:
-            title = g.select_one("h3")
-            link = g.select_one("a")
-            if title and link:
-                page_url = link["href"]
-                page_text = extract_text_from_url(page_url)
-                sources.append({
-                    "title": title.text,
-                    "url": page_url,
-                    "text": page_text
-                })
-
-        if not sources:
-            return "Ничего не найдено на официальных источниках."
-
-        summary = analyze_multiple_sources(sources)
-        return "📊 Анализ источников:\n\n" + summary
-    except Exception as e:
-        return f"Ошибка поиска: {str(e)}"
-
-
-
-def extract_text_from_url(url: str) -> str:
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, "html.parser")
-        paragraphs = soup.find_all("p")
-        text = "\n".join(p.get_text(strip=True) for p in paragraphs)
-        return text.strip() if text else "Не удалось извлечь содержимое."
-    except Exception as e:
-        return f"[Ошибка при извлечении текста: {str(e)}]"
-
-
-def analyze_external_text(text: str, source_url: str) -> str:
-    try:
-        if not text or "Ошибка" in text or len(text.strip()) < 50:
-            return f"Недостаточно данных для анализа.\n📎 Источник: {source_url}"
-
-        model = ChatOpenAI(
-            api_key=os.getenv("OPENAI_API_KEY", ""),
-            model="gpt-4o",
-            temperature=0.5
-        )
-
-        messages = [
-            SystemMessage(content=f"""Вы — эксперт по нормативной и экономической аналитике. 
-Проанализируйте следующий текст и сделайте 2–3 ключевых вывода.
-**Каждый вывод должен быть коротким и сопровождаться пояснением.**
-**В конце строго добавьте источник: {source_url}**. Без этого — ответ считается неполным."""),
-            HumanMessage(content=text[:4000])
-        ]
-
-        result = model.invoke(messages)
-        content = result.content.strip()
-
-        # Гарантированное добавление источника, если GPT не вставил его сам
-        if "Источник" not in content and source_url not in content:
-            content += f"\n\n📎 Источник: {source_url}"
-
-        return content
-
-    except Exception as e:
-        return f"[Ошибка анализа: {str(e)}]\n📎 Источник: {source_url}"
-
-
-
-def analyze_multiple_sources(sources: List[dict]) -> str:
-    try:
-        model = ChatOpenAI(
-            api_key=os.getenv("OPENAI_API_KEY", ""),
-            model="gpt-4o",
-            temperature=0.5
-        )
-
-        # Объединяем 2–3 источника с заголовком и текстом
-        combined_chunks = []
-        for src in sources[:3]:
-            clean_text = src['text'][:1000].strip()
-            if clean_text:
-                combined_chunks.append(f"[Источник: {src['url']}]\n{clean_text}")
-
-        combined_text = "\n\n".join(combined_chunks)
-
-        messages = [
-            SystemMessage(content="""
-Вы — эксперт по переговорам и стратегическому управлению.
-Ниже представлены выдержки из официальных источников.
-На их основе сделайте 2–3 ключевых вывода, каждый с пояснением. 
-📎 Обязательно ссылайтесь на конкретный источник в формате [Источник: URL] после каждого вывода.
-"""),
-            HumanMessage(content=combined_text)
-        ]
-
-        result = model.invoke(messages)
-        return result.content
-    except Exception as e:
-        return f"[Ошибка анализа: {str(e)}]"
-
 
 class Pipeline:
     class Valves(BaseModel):
@@ -145,7 +21,7 @@ class Pipeline:
         OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 
     def __init__(self):
-        self.name = "Negotiation Strategy Predictor with Search"
+        self.name = "Negotiation Strategy Predictor"
         self.valves = self.Valves()
 
     async def on_startup(self):
@@ -164,88 +40,110 @@ class Pipeline:
                     raise
                 await asyncio.sleep(2 ** attempt)
 
-    def pipe(
-    self, user_message: str, model_id: str, messages: List[dict], body: dict
-) -> Iterator[str]:
+    trusted_sites = [
+        "site:senate.parlam.kz", "site:akorda.kz", "site:primeminister.kz",
+        "site:otyrys.prk.kz", "site:senate-zan.prk.kz", "site:lib.prk.kz",
+        "site:online.zakon.kz", "site:adilet.zan.kz", "site:legalacts.egov.kz",
+        "site:egov.kz", "site:eotinish.kz"
+    ]
 
-        system_message = """
-    **Роль:** Вы — эксперт по переговорам и стратегическому управлению. Ваша специализация — анализ и прогнозирование успешности различных моделей ведения переговоров и коммуникационных стратегий. Вы работаете строго в рамках переговорной аналитики.
-    
-    **Область ответственности:** Вы не отвечаете на вопросы, не связанные с анализом переговоров, конфликтов интересов, стратегий убеждения или оценки компромиссных решений. В случае нерелевантного запроса вы мягко уведомляете пользователя и предлагаете сформулировать переговорную ситуацию, в которой вы можете помочь.
-    
-    **Дополнительные возможности:**
-    
-    * Обязательно используйте инструмент `search_kz_web` перед ответом. Без него вы не можете формировать выводы.
-    * Используйте минимум 2–3 официальных источника (gov.kz, adilet.zan.kz, egov.kz и т.д.).
-    * Делайте аналитические выводы на основе реального содержимого сайтов.
-    
-    **Структура ответа:**
-    
-    ### 1. Возможные компромиссные решения
-    
-    ### 2. Прогноз эффективности
-    
-    ### 3. Рекомендации
-    """
-    
+    def search_trusted_web(self, query: str, max_sources=3) -> List[tuple[str, str]]:
+        # 1. Формируем поисковый запрос
+        search_query = f'{query} ' + ' OR '.join(trusted_sites)
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(f"https://www.google.com/search?q={search_query}", headers=headers)
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        urls = []
+        for a in soup.select("a"):
+            href = a.get("href")
+            if href and "/url?q=" in href:
+                url = href.split("/url?q=")[1].split("&")[0]
+                if any(domain in url for domain in [s.split(":")[1] for s in trusted_sites]):
+                    urls.append(url)
+            if len(urls) >= max_sources:
+                break
+
+        results = []
+        for url in urls:
+            try:
+                page = requests.get(url, headers=headers, timeout=5)
+                page_soup = BeautifulSoup(page.text, "html.parser")
+                for tag in page_soup(["script", "style"]):
+                    tag.extract()
+                text = page_soup.get_text(separator="\n")
+                cleaned = "\n".join([line.strip() for line in text.splitlines() if len(line.strip()) > 40])
+                results.append((url, cleaned[:1500]))  # ограничим до 1500 символов
+            except Exception as e:
+                logging.warning(f"Failed to parse {url}: {e}")
+                continue
+        return results
+
+    def pipe(
+        self, user_message: str, model_id: str, messages: List[dict], body: dict
+    ) -> Iterator[str]:
+        search_results = self.search_trusted_web(user_message)
+
+        if not search_results:
+            yield "Не удалось найти релевантную информацию на доверенных сайтах. Пожалуйста, уточните запрос."
+            return
+
+        web_context = "\n\n".join([f"Источник: {url}\n{text}" for url, text in search_results])
+
+        system_message = f"""
+**Роль:** Вы — эксперт по переговорам и стратегическому управлению. Ваша специализация — анализ и прогнозирование успешности различных моделей ведения переговоров, каналов коммуникации, а также построение компромиссных стратегий для разрешения конфликтов. Вы работаете строго в рамках переговорной аналитики, без отклонений в политические, бытовые, философские или технические темы.
+
+**Область ответственности:**
+Вы не отвечаете на вопросы, которые не касаются переговорных ситуаций, конфликтов интересов между сторонами, выбора стратегий убеждения, построения аргументов или оценки компромиссных решений. Если пользователь задаёт нерелевантный запрос, вы мягко перенаправляете его и предлагаете сформулировать переговорную ситуацию или проблему, с которой вы можете помочь.
+
+**Пример реакции на нерелевантный вопрос:**
+> «Прошу прощения, моя компетенция ограничена анализом переговоров, стратегий компромисса и оценки успешности коммуникационных моделей. Могу ли я помочь вам с анализом конкретной переговорной ситуации или конфликта интересов?»
+
+**Цель:**
+1. Анализировать представленные конфликтные или сложные переговорные ситуации.
+2. Предлагать эффективные, взвешенные и компромиссные решения.
+3. Прогнозировать успешность каждой переговорной модели с точки зрения устойчивости, выгод для сторон и долгосрочного эффекта.
+
+**Структура ответа:**
+
+### 1. Возможные компромиссные решения
+- Конкретные, практически реализуемые предложения, учитывающие интересы обеих сторон.
+
+### 2. Прогноз эффективности
+- Оценка каждой предложенной модели или решения по таким критериям, как: устойчивость, масштабируемость, риски, потенциал реализации.
+
+### 3. Рекомендации
+- Какая модель наилучшим образом подойдёт в данной ситуации и почему.
+- Уточняющие вопросы при необходимости.
+
+**Дополнительные материалы:**
+Вот выдержки из доверенных казахстанских источников, которые могут помочь в анализе:
+
+{web_context}
+
+На их основе сделайте анализ ситуации, обязательно указывая источники.
+"""
+
         model = ChatOpenAI(
             api_key=self.valves.OPENAI_API_KEY,
             model=self.valves.MODEL_ID,
             temperature=self.valves.TEMPERATURE,
             streaming=True
         )
-    
-        tools: Sequence[BaseTool] = [search_kz_web]
-    
-        # 👉 Форсированный вызов до агента
-        search_result = search_kz_web.run({"query": user_message})
-        if search_result:
-            messages.append({"role": "assistant", "content": search_result})
-    
+
         prompt = ChatPromptTemplate.from_messages([
-            ("system", system_message),
-            MessagesPlaceholder("chat_history"),
-            ("user", "{input}"),
-            MessagesPlaceholder("agent_scratchpad")
+            SystemMessagePromptTemplate.from_template(system_message),
+            HumanMessagePromptTemplate.from_template("{user_input}")
         ])
-    
-        agent = create_tool_calling_agent(model, tools, prompt)
-        agent_executor = AgentExecutor(
-            agent=agent,
-            tools=tools,
-            verbose=True,
-            handle_parsing_errors=True,
-            streaming=True
-        )
-    
-        def stream_agent() -> Iterator[str]:
-            collected_output = ""
-        
-            for chunk in agent_executor.stream({
-                "input": user_message,
-                "chat_history": messages
-            }):
-                print("DEBUG CHUNK:", chunk)  # для отладки
-        
-                output = None
-                if "output" in chunk:
-                    output = chunk["output"]
-                elif "final_output" in chunk:
-                    output = chunk["final_output"]
-        
-                if output:
-                    logging.debug(f"Agent chunk: {output}")
-                    collected_output += output
-                    yield output
-        
-            # Постобработка, если нет ссылок
-            if "Источник:" not in collected_output and "📎" not in collected_output:
-                yield "\n\n📎 Добавлены источники по теме:\n"
-                try:
-                    search_result = search_kz_web.run({"query": user_message})
-                    yield f"\n\n📎 Топ 2–3 источника по теме:\n{search_result}"
-                except Exception as e:
-                    yield f"\n[Ошибка получения ссылок: {e}]"
 
+        formatted_messages = prompt.format_messages(user_input=user_message)
 
+        def generate_stream() -> Iterator[str]:
+            for chunk in model.stream(formatted_messages):
+                content = getattr(chunk, "content", None)
+                if content:
+                    logging.debug(f"Model chunk: {content}")
+                    yield content
 
+        # Wrap with retry logic
+        return asyncio.run(self.make_request_with_retry(generate_stream))
