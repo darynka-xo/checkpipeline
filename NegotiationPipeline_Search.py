@@ -4,7 +4,7 @@ import os
 import asyncio
 import json
 import aiohttp
-from typing import List, Iterator, Callable, Any, Dict, Optional
+from typing import List, Iterator, Callable, Any, Dict, Optional, Union
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -49,16 +49,6 @@ class Pipeline:
 
     async def on_shutdown(self):
         logging.info("Pipeline is shutting down...")
-
-    async def make_request_with_retry(self, fn: Callable[[], Iterator[str]], retries=3) -> Iterator[str]:
-        for attempt in range(retries):
-            try:
-                return fn()
-            except Exception as e:
-                logging.error(f"Attempt {attempt + 1} failed: {e}")
-                if attempt + 1 == retries:
-                    raise
-                await asyncio.sleep(2 ** attempt)
 
     async def search_web(self, query: str, num_results: int = 3) -> SearchResponse:
         """
@@ -133,13 +123,18 @@ class Pipeline:
         return results_text
 
     async def pipe(
-            self, user_message: str, model_id: str, messages: List[dict], body: dict
-    ) -> Iterator[str]:
-        # First, perform web search based on user query
-        search_response = await self.search_web(user_message)
-        search_results_text = self.format_search_results(search_response)
+            self, user_message: str, model_id: str = None, messages: List[dict] = None, body: dict = None
+    ) -> Union[str, Iterator[str]]:
+        """
+        Main pipeline function that processes user input and returns model response.
+        For OpenWebUI, this method needs to handle both streaming and non-streaming responses.
+        """
+        try:
+            # First, perform web search based on user query
+            search_response = await self.search_web(user_message)
+            search_results_text = self.format_search_results(search_response)
 
-        system_message = """
+            system_message = """
 **Роль:** Вы — эксперт по переговорам и стратегическому управлению. Ваша специализация — анализ и прогнозирование успешности различных моделей ведения переговоров, каналов коммуникации, а также построение компромиссных стратегий для разрешения конфликтов. Вы работаете строго в рамках переговорной аналитики, без отклонений в политические, бытовые, философские или технические темы.
 
 **Область ответственности:**
@@ -173,30 +168,79 @@ class Pipeline:
 ### 4. Использованные источники
 - Перечислите номера и названия использованных источников.
 """
-        # Insert search results into system message
-        system_message = system_message.format(search_results=search_results_text)
+            # Insert search results into system message
+            system_message = system_message.format(search_results=search_results_text)
 
-        model = ChatOpenAI(
-            api_key=self.valves.OPENAI_API_KEY,
-            model=self.valves.MODEL_ID if not model_id else model_id,
-            temperature=self.valves.TEMPERATURE,
-            max_tokens=self.valves.MAX_TOKENS,
-            streaming=True
-        )
+            model = ChatOpenAI(
+                api_key=self.valves.OPENAI_API_KEY,
+                model=self.valves.MODEL_ID if not model_id else model_id,
+                temperature=self.valves.TEMPERATURE,
+                max_tokens=self.valves.MAX_TOKENS,
+                streaming=True
+            )
 
-        prompt = ChatPromptTemplate.from_messages([
-            SystemMessagePromptTemplate.from_template(system_message),
-            HumanMessagePromptTemplate.from_template("{user_input}")
-        ])
+            prompt = ChatPromptTemplate.from_messages([
+                SystemMessagePromptTemplate.from_template(system_message),
+                HumanMessagePromptTemplate.from_template("{user_input}")
+            ])
 
-        formatted_messages = prompt.format_messages(user_input=user_message)
+            formatted_messages = prompt.format_messages(user_input=user_message)
 
-        def generate_stream() -> Iterator[str]:
-            for chunk in model.stream(formatted_messages):
-                content = getattr(chunk, "content", None)
-                if content:
-                    logging.debug(f"Model chunk: {content}")
-                    yield content
+            # Check if streaming is needed
+            if body and body.get("stream", False):
+                # For streaming responses
+                async def async_generator():
+                    for chunk in model.stream(formatted_messages):
+                        content = getattr(chunk, "content", None)
+                        if content:
+                            logging.debug(f"Model chunk: {content}")
+                            yield content
 
-        # Wrap with retry logic
-        return await self.make_request_with_retry(generate_stream)
+                return async_generator()
+            else:
+                # For non-streaming responses (collect all chunks)
+                full_response = ""
+                for chunk in model.stream(formatted_messages):
+                    content = getattr(chunk, "content", None)
+                    if content:
+                        logging.debug(f"Model chunk: {content}")
+                        full_response += content
+
+                return full_response
+
+        except Exception as e:
+            logging.error(f"Error in pipeline: {str(e)}")
+            return f"Извините, произошла ошибка при обработке запроса: {str(e)}"
+
+
+# This function is needed to properly handle the pipeline within OpenWebUI
+async def filter_inlet(body, context):
+    pipeline = Pipeline()
+    await pipeline.on_startup()
+
+    stream = body.get("stream", False)
+    user_message = body.get("prompt", "")
+    model_id = body.get("model", None)
+    messages = body.get("messages", [])
+
+    logging.info(f"stream:{stream}")
+
+    # For streaming responses
+    if stream:
+        async def generate():
+            try:
+                async for chunk in await pipeline.pipe(user_message, model_id, messages, body):
+                    yield chunk
+            except Exception as e:
+                logging.error(f"Error in generate: {str(e)}")
+                yield f"Error: {str(e)}"
+
+        return generate()
+
+    # For non-streaming responses
+    try:
+        response = await pipeline.pipe(user_message, model_id, messages, body)
+        return response
+    except Exception as e:
+        logging.error(f"Error in filter_inlet: {str(e)}")
+        return f"Error: {str(e)}"
