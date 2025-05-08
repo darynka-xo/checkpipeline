@@ -2,15 +2,12 @@ import logging
 import sys
 import os
 import asyncio
-from typing import List, Iterator, Callable, Any
+from typing import List, Iterator, Callable, Any, Optional
 from pydantic import BaseModel
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.prompts import SystemMessagePromptTemplate, HumanMessagePromptTemplate
-import aiohttp
-import json
-from aiohttp import ClientSession, ClientTimeout
-from fastapi import HTTPException
+from langchain_community.utilities import GoogleSerperAPIWrapper
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
@@ -22,7 +19,7 @@ class Pipeline:
         MAX_TOKENS: int = 1500
         OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
         SERPER_API_KEY: str = os.getenv("SERPER_API_KEY", "")
-
+        
     def __init__(self):
         self.name = "Negotiation Strategy Predictor"
         self.valves = self.Valves()
@@ -32,6 +29,7 @@ class Pipeline:
             "site:lib.prk.kz", "site:online.zakon.kz", "site:adilet.zan.kz",
             "site:legalacts.egov.kz", "site:egov.kz", "site:eotinish.kz"
         ]
+        self.search = GoogleSerperAPIWrapper(serper_api_key=self.valves.SERPER_API_KEY)
 
     async def on_startup(self):
         logging.info("Pipeline is warming up...")
@@ -39,149 +37,108 @@ class Pipeline:
     async def on_shutdown(self):
         logging.info("Pipeline is shutting down...")
 
-    async def make_request_with_retry(self, fn: Callable[[], Iterator[dict]], retries=3) -> Iterator[dict]:
+    async def make_request_with_retry(self, fn: Callable[[], Iterator[str]], retries=3) -> Iterator[str]:
         for attempt in range(retries):
             try:
                 return fn()
             except Exception as e:
                 logging.error(f"Attempt {attempt + 1} failed: {e}")
                 if attempt + 1 == retries:
-                    raise HTTPException(status_code=500, detail=f"Pipeline failed after {retries} attempts: {str(e)}")
+                    raise
                 await asyncio.sleep(2 ** attempt)
 
-    async def search_trusted_sources(self, query: str, session: ClientSession) -> List[dict]:
-        """Perform a web search using Serper API, limited to trusted sites."""
-        search_query = f"{query} {' '.join(self.trusted_sites)}"
-        url = "https://google.serper.dev/search"
-        headers = {
-            "X-API-KEY": self.valves.SERPER_API_KEY,
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "q": search_query,
-            "num": 10
-        }
+    async def perform_web_search(self, query: str) -> Optional[str]:
+        """Perform web search from trusted sources and format results."""
+        try:
+            site_query = " OR ".join(self.trusted_sites)
+            full_query = f"{query} ({site_query})"
+            results = self.search.results(full_query, 3)  # Get top 3 results
+            
+            if not results or 'organic' not in results or not results['organic']:
+                return None
+                
+            formatted_results = []
+            for result in results['organic'][:3]:  # Take top 3 results
+                title = result.get('title', 'No title')
+                link = result.get('link', '#')
+                snippet = result.get('snippet', 'No description available')
+                formatted_results.append(
+                    f"**Source:** [{title}]({link})\n"
+                    f"**Content:** {snippet}\n"
+                )
+            
+            return "\n\n".join(formatted_results)
+        except Exception as e:
+            logging.error(f"Web search failed: {e}")
+            return None
 
-        timeout = ClientTimeout(total=10)  # 10-second timeout
-        retries = 3
-        for attempt in range(retries):
-            try:
-                async with session.post(url, headers=headers, json=payload, timeout=timeout) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        results = data.get("organic", [])
-                        formatted_results = [
-                            {
-                                "web_id": f"web:{idx}",
-                                "title": result.get("title", ""),
-                                "snippet": result.get("snippet", ""),
-                                "link": result.get("link", "")
-                            }
-                            for idx, result in enumerate(results)
-                        ]
-                        logging.debug(f"Search results: {formatted_results}")
-                        return formatted_results
-                    else:
-                        logging.error(f"Serper API error: {response.status}")
-                        return []
-            except Exception as e:
-                logging.error(f"Search attempt {attempt + 1} failed: {e}")
-                if attempt + 1 == retries:
-                    logging.error("Max retries reached for search")
-                    return []
-                await asyncio.sleep(2 ** attempt)
-
-    def pipe(
+    async def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict
-    ) -> Iterator[dict]:
+    ) -> Iterator[str]:
         system_message = """
-**Role:** You are an expert in negotiation and strategic management, specializing in analyzing and predicting the success of negotiation models, communication channels, and building compromise strategies for conflict resolution. Your expertise is strictly limited to negotiation analytics, avoiding political, domestic, philosophical, or technical topics.
+**Роль:** Вы — эксперт по переговорам и стратегическому управлению. Ваша специализация — анализ и прогнозирование успешности различных моделей ведения переговоров, каналов коммуникации, а также построение компромиссных стратегий для разрешения конфликтов. Вы работаете строго в рамках переговорной аналитики, без отклонений в политические, бытовые, философские или технические темы.
 
-**Scope of Responsibility:**
-You only respond to questions related to negotiation situations, conflicts of interest, persuasion strategies, argument construction, or compromise evaluations. For irrelevant queries, gently redirect the user to formulate a negotiation-related situation or problem.
+**Область ответственности:**
+Вы не отвечаете на вопросы, которые не касаются переговорных ситуаций, конфликтов интересов между сторонами, выбора стратегий убеждения, построения аргументов или оценки компромиссных решений. Если пользователь задаёт нерелевантный запрос, вы мягко перенаправляете его и предлагаете сформулировать переговорную ситуацию или проблему, с которой вы можете помочь.
 
-**Example Response to Irrelevant Query:**
-> "My expertise is limited to negotiation analysis, compromise strategies, and communication model success. Can I assist with a specific negotiation situation or conflict?"
+**Пример реакции на нерелевантный вопрос:**
+> «Прошу прощения, моя компетенция ограничена анализом переговоров, стратегий компромисса и оценки успешности коммуникационных моделей. Могу ли я помочь вам с анализом конкретной переговорной ситуации или конфликта интересов?»
 
-**Objective:**
-1. Analyze provided conflict or complex negotiation situations.
-2. Propose effective, balanced, and compromise-based solutions.
-3. Predict the success of each negotiation model based on sustainability, benefits, and long-term impact.
+**Цель:**
+1. Анализировать представленные конфликтные или сложные переговорные ситуации.
+2. Предлагать эффективные, взвешенные и компромиссные решения.
+3. Прогнозировать успешность каждой переговорной модели с точки зрения устойчивости, выгод для сторон и долгосрочного эффекта.
 
-**Response Structure:**
+**Структура ответа:**
 
-### 1. Possible Compromise Solutions
-- Specific, actionable proposals considering both parties' interests.
+### 1. Возможные компромиссные решения
+- Конкретные, практически реализуемые предложения, учитывающие интересы обеих сторон.
 
-### 2. Effectiveness Forecast
-- Evaluate each proposed model based on sustainability, scalability, risks, and implementation potential.
+### 2. Прогноз эффективности
+- Оценка каждой предложенной модели или решения по таким критериям, как: устойчивость, масштабируемость, риски, потенциал реализации.
 
-### 3. Recommendations
-- Identify the best model for the situation and explain why.
-- Include clarifying questions if needed.
+### 3. Рекомендации
+- Какая модель наилучшим образом подойдёт в данной ситуации и почему.
+- Уточняющие вопросы при необходимости.
 
-**Web Search Integration:**
-- Use provided search results from trusted sources to strengthen arguments and provide evidence.
-- Cite sources using the format: [web:<number>]
-- Only include relevant information from search results that supports the negotiation analysis.
-- If no relevant search results are available, rely on your expertise without citing.
+**Дополнительно:**
+Если в ответе используются ссылки на официальные источники, они будут предоставлены в разделе "Источники".
 """
 
-        async def generate_response() -> Iterator[dict]:
-            async with ClientSession() as session:
-                try:
-                    # Perform search
-                    search_results = await self.search_trusted_sources(user_message, session)
-                    search_context = "\n".join(
-                        [f"Web ID: {res['web_id']}\nTitle: {res['title']}\nSnippet: {res['snippet']}\nLink: {res['link']}\n"
-                         for res in search_results]
-                    ) if search_results else "No relevant search results found."
+        # Perform web search if needed (for factual or legal questions)
+        search_results = None
+        if any(keyword in user_message.lower() for keyword in ['закон', 'правов', 'норматив', 'регулир', 'акт']):
+            search_results = await self.perform_web_search(user_message)
 
-                    model = ChatOpenAI(
-                        api_key=self.valves.OPENAI_API_KEY,
-                        model=self.valves.MODEL_ID,
-                        temperature=self.valves.TEMPERATURE,
-                        streaming=True
-                    )
+        model = ChatOpenAI(
+            api_key=self.valves.OPENAI_API_KEY,
+            model=self.valves.MODEL_ID,
+            temperature=self.valves.TEMPERATURE,
+            streaming=True
+        )
 
-                    prompt = ChatPromptTemplate.from_messages([
-                        SystemMessagePromptTemplate.from_template(system_message),
-                        HumanMessagePromptTemplate.from_template(
-                            "User Input: {user_input}\n\nSearch Results:\n{search_context}"
-                        )
-                    ])
+        # Prepare the prompt with optional search results
+        human_message_content = user_message
+        if search_results:
+            human_message_content += (
+                "\n\nДополнительная информация из официальных источников:\n"
+                f"{search_results}\n"
+                "При ответе учитывай эту информацию и при необходимости ссылайся на эти источники."
+            )
 
-                    formatted_messages = prompt.format_messages(
-                        user_input=user_message,
-                        search_context=search_context
-                    )
+        prompt = ChatPromptTemplate.from_messages([
+            SystemMessagePromptTemplate.from_template(system_message),
+            HumanMessagePromptTemplate.from_template("{user_input}")
+        ])
 
-                    # Stream response in OpenAI-compatible format
-                    async for chunk in model.astream(formatted_messages):
-                        content = getattr(chunk, "content", None)
-                        if content:
-                            logging.debug(f"Model chunk: {content}")
-                            yield {
-                                "choices": [
-                                    {
-                                        "delta": {"content": content},
-                                        "index": 0,
-                                        "finish_reason": None
-                                    }
-                                ]
-                            }
-                    # Signal completion
-                    yield {
-                        "choices": [
-                            {
-                                "delta": {},
-                                "index": 0,
-                                "finish_reason": "stop"
-                            }
-                        ]
-                    }
-                except Exception as e:
-                    logging.error(f"Error in generate_response: {e}")
-                    raise HTTPException(status_code=500, detail=f"Error generating response: {str(e)}")
+        formatted_messages = prompt.format_messages(user_input=human_message_content)
 
-        return asyncio.run(self.make_request_with_retry(generate_response))
+        def generate_stream() -> Iterator[str]:
+            for chunk in model.stream(formatted_messages):
+                content = getattr(chunk, "content", None)
+                if content:
+                    logging.debug(f"Model chunk: {content}")
+                    yield content
+
+        # Wrap with retry logic
+        return await self.make_request_with_retry(generate_stream)
