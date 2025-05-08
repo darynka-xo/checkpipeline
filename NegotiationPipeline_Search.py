@@ -66,7 +66,6 @@ class Pipeline:
                     if response.status == 200:
                         data = await response.json()
                         results = data.get("organic", [])
-                        # Format results with web IDs for citation
                         formatted_results = [
                             {
                                 "web_id": f"web:{idx}",
@@ -88,7 +87,6 @@ class Pipeline:
     def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict
     ) -> Iterator[str]:
-
         system_message = """
 **Role:** You are an expert in negotiation and strategic management, specializing in analyzing and predicting the success of negotiation models, communication channels, and building compromise strategies for conflict resolution. Your expertise is strictly limited to negotiation analytics, avoiding political, domestic, philosophical, or technical topics.
 
@@ -117,7 +115,7 @@ You only respond to questions related to negotiation situations, conflicts of in
 
 **Web Search Integration:**
 - Use provided search results from trusted sources to strengthen arguments and provide evidence.
-- Cite sources using the format:web:<number>
+- Cite sources using the format: [web:<number>]
 - Only include relevant information from search results that supports the negotiation analysis.
 - If no relevant search results are available, rely on your expertise without citing.
 """
@@ -155,5 +153,4 @@ You only respond to questions related to negotiation situations, conflicts of in
                     logging.debug(f"Model chunk: {content}")
                     yield content
 
-        # Wrap with retry logic
         return asyncio.run(self.make_request_with_retry(generate_response))
