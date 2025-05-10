@@ -22,7 +22,7 @@ class Pipeline:
         SEARCH_API_URL: str = os.getenv("SEARCH_API_URL", "http://localhost:8008/check_and_search")
 
     def __init__(self):
-        self.name = "Hints"
+        self.name = "Подсказки и рекомендации по литературе для законодательных проектов на основе ИИ"
         self.valves = self.Valves()
 
     async def on_startup(self):
