@@ -8,6 +8,9 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.vectorstores.pgvector import PGVector
+from typing import List, Iterator, Callable, Any, Dict
+from pydantic import BaseModel
+import httpx
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
@@ -19,6 +22,7 @@ class Pipeline:
         TEMPERATURE: float = 0.5
         MAX_TOKENS: int = 1500
         OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+        SEARCH_API_URL: str = os.getenv("SEARCH_API_URL", "http://localhost:8008/check_and_search")
 
     def __init__(self):
         self.name = "Debate Pipeline"
@@ -40,6 +44,19 @@ class Pipeline:
                     raise
                 await asyncio.sleep(2 ** attempt)
 
+    async def call_search_api(self, prompt: str) -> Dict[str, Any]:
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.post(
+                    self.valves.SEARCH_API_URL,
+                    json={"prompt": prompt, "pipeline": "NegotiationPipeline"}
+                )
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            logging.error(f"Search API error: {e}")
+            return {"search_required": False, "context": "", "citations": []}
+
     def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict
     ) -> Iterator[str]:
@@ -47,7 +64,7 @@ class Pipeline:
         embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
 
         vectorstore = PGVector(
-            connection_string=os.getenv("PGVECTOR_URL", "postgresql://admin:tester123@host.docker.internal:5432/postgres"),
+            connection_string=os.getenv("PGVECTOR_URL", "postgresql://admin:tester123@localhost:5432/postgres"),
             collection_name="laws_chunks_ru",
             embedding_function=embeddings
         )
@@ -88,6 +105,9 @@ class Pipeline:
 - Альтернативные формулировки и подходы
 - Стратегические советы для повышения убедительности
 """
+        search_result = asyncio.run(self.call_search_api(user_message))
+        if search_result["search_required"] and search_result["context"]:
+            user_message += "\n\nКонтекст из официальных источников:\n" + search_result["context"]
 
         model = ChatOpenAI(
             api_key=self.valves.OPENAI_API_KEY,
@@ -101,6 +121,7 @@ class Pipeline:
             HumanMessagePromptTemplate.from_template("{user_input}")
         ])
 
+
         formatted_messages = prompt.format_messages(user_input=user_message)
 
         def stream_model() -> Iterator[str]:
@@ -109,6 +130,9 @@ class Pipeline:
                 if content:
                     logging.debug(f"Model chunk: {content}")
                     yield content
-
+            if search_result["search_required"] and search_result["citations"]:
+                yield "\n\n### Использованные источники:"
+                for i, link in enumerate(search_result["citations"], 1):
+                    yield f"\n[{i}] {link}"
 
         return asyncio.run(self.make_request_with_retry(stream_model))
