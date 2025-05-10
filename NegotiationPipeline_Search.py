@@ -46,7 +46,7 @@ class Pipeline:
             async with httpx.AsyncClient(timeout=20) as client:
                 response = await client.post(
                     self.valves.SEARCH_API_URL,
-                    json={"prompt": prompt}
+                    json={"prompt": prompt, "pipeline": "NegotiationPipeline"}
                 )
                 response.raise_for_status()
                 return response.json()
@@ -57,8 +57,6 @@ class Pipeline:
     def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict
     ) -> Iterator[str]:
-
-        # SYSTEM MESSAGE: define role and behavior
         system_message = """
 **Роль:** Вы — эксперт по переговорам и стратегическому управлению. Ваша специализация — анализ и прогнозирование успешности различных моделей ведения переговоров, каналов коммуникации, а также построение компромиссных стратегий для разрешения конфликтов. Вы работаете строго в рамках переговорной аналитики, без отклонений в политические, бытовые, философские или технические темы.
 
@@ -83,15 +81,12 @@ class Pipeline:
 - Уточняющие вопросы (при необходимости).
 """
 
-        # Call your FastAPI API to check and enrich the prompt
         search_result = asyncio.run(self.call_search_api(user_message))
 
-        # Final prompt content with context if needed
         enriched_prompt = user_message
         if search_result["search_required"] and search_result["context"]:
             enriched_prompt += "\n\nКонтекст по официальным источникам:\n" + search_result["context"]
 
-        # LangChain prompt setup
         model = ChatOpenAI(
             api_key=self.valves.OPENAI_API_KEY,
             model=self.valves.MODEL_ID,
@@ -108,13 +103,11 @@ class Pipeline:
         formatted_messages = prompt.format_messages(user_input=enriched_prompt)
 
         def generate_stream() -> Iterator[str]:
-            # Yield model output
             for chunk in model.stream(formatted_messages):
                 content = getattr(chunk, "content", None)
                 if content:
                     yield content
 
-            # Append citations (if any)
             if search_result["search_required"] and search_result["citations"]:
                 yield "\n\n### Использованные источники:"
                 for i, link in enumerate(search_result["citations"], 1):
