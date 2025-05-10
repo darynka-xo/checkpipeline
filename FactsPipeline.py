@@ -72,7 +72,6 @@ class Pipeline:
 
 ### ✅ Проверка факта
 - Чёткое подтверждение или опровержение утверждения.
-- Цитаты и выдержки из релевантных источников.
 """
 
         search_result = asyncio.run(self.call_search_api(user_message))
