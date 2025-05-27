@@ -60,18 +60,8 @@ class Pipeline:
     def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict
     ) -> Iterator[str]:
-        # Подключение к векторной БД
-        embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
-
-        vectorstore = PGVector(
-            connection_string=os.getenv("PGVECTOR_URL", "postgresql://admin:tester123@localhost:5432/postgres"),
-            collection_name="laws_chunks_ru",
-            embedding_function=embeddings
-        )
-
-        retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 5})
-        docs = retriever.get_relevant_documents(user_message)
-        legal_context = "\n\n".join([f"- {doc.page_content}" for doc in docs])
+        # Временно отключён блок векторного поиска
+        legal_context = ""
 
         # System message with injected legal context
         system_message = f"""
@@ -111,22 +101,21 @@ class Pipeline:
         search_result = asyncio.run(self.call_search_api(user_message))
         if search_result["search_required"] and search_result["context"]:
             user_message += "\n\nКонтекст из официальных источников:\n" + search_result["context"]
-
+    
         model = ChatOpenAI(
             api_key=self.valves.OPENAI_API_KEY,
             model=self.valves.MODEL_ID,
             temperature=self.valves.TEMPERATURE,
             streaming=True
         )
-
+    
         prompt = ChatPromptTemplate.from_messages([
             SystemMessagePromptTemplate.from_template(system_message),
             HumanMessagePromptTemplate.from_template("{user_input}")
         ])
-
-
+    
         formatted_messages = prompt.format_messages(user_input=user_message)
-
+    
         def stream_model() -> Iterator[str]:
             for chunk in model.stream(formatted_messages):
                 content = getattr(chunk, "content", None)
@@ -137,5 +126,5 @@ class Pipeline:
                 yield "\n\n### Использованные источники:"
                 for i, link in enumerate(search_result["citations"], 1):
                     yield f"\n[{i}] {link}"
-
+    
         return asyncio.run(self.make_request_with_retry(stream_model))
