@@ -55,7 +55,7 @@ class Pipeline:
             async with httpx.AsyncClient(timeout=20) as client:
                 response = await client.post(
                     self.valves.SEARCH_API_URL,
-                    json={"prompt": prompt, "pipeline": "NegotiationPipeline"}
+                    json={"prompt": prompt, "pipeline": "DebatePipeline"}
                 )
                 response.raise_for_status()
                 return response.json()
