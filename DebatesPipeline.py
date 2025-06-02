@@ -11,6 +11,12 @@ from langchain.vectorstores.pgvector import PGVector
 from typing import List, Iterator, Callable, Any, Dict
 from pydantic import BaseModel
 import httpx
+from PIL import Image
+import io
+import fitz  # PyMuPDF for PDF
+import docx2txt
+import base64
+import mimetypes
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
@@ -57,9 +63,56 @@ class Pipeline:
             logging.error(f"Search API error: {e}")
             return {"search_required": False, "context": "", "citations": []}
 
-    def pipe(
-        self, user_message: str, model_id: str, messages: List[dict], body: dict
-    ) -> Iterator[str]:
+    async def inlet(self, body: dict, user: dict) -> dict:
+        print(f"Received body: {body}")
+        files = body.get("files", [])
+        extracted_texts = []
+
+        for file in files:
+            content_url = file["url"] + "/content"
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(content_url)
+                response.raise_for_status()
+                content = response.content
+
+            mime_type = file.get("mime_type") or mimetypes.guess_type(file.get("name", ""))[0]
+
+            if mime_type in ["application/pdf"]:
+                doc = fitz.open(stream=content, filetype="pdf")
+                text = "\n".join([page.get_text() for page in doc])
+                extracted_texts.append(text)
+
+            elif mime_type in ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"]:
+                with open("temp.docx", "wb") as f:
+                    f.write(content)
+                text = docx2txt.process("temp.docx")
+                os.remove("temp.docx")
+                extracted_texts.append(text)
+
+            elif mime_type and mime_type.startswith("image/"):
+                image = Image.open(io.BytesIO(content))
+                from openai import OpenAI
+                client = OpenAI(api_key=self.valves.OPENAI_API_KEY)
+                base64_image = base64.b64encode(content).decode("utf-8")
+                ocr_response = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "user", "content": [
+                            {"type": "text", "text": "Распознай текст на изображении."},
+                            {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}}
+                        ]}
+                    ]
+                )
+                image_text = ocr_response.choices[0].message.content.strip()
+                extracted_texts.append(image_text)
+
+        body["file_text"] = "\n".join(extracted_texts)
+        return body
+
+    def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Iterator[str]:
+        file_text = body.get("file_text", "")
+        if file_text:
+            user_message += f"\n\nТекст из прикреплённых документов:\n{file_text}"
         # Временно отключён блок векторного поиска
         legal_context = ""
 
