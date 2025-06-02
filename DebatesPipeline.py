@@ -64,59 +64,62 @@ class Pipeline:
             return {"search_required": False, "context": "", "citations": []}
 
     async def inlet(self, body: dict, user: dict) -> dict:
-        print(f"Received body: {body}")
-        messages = body.get("messages", [])
+        import json
+
+        logging.info(f"📥 Received inlet body:\n{json.dumps(body, indent=2, ensure_ascii=False)}")
+        files = body.get("files", [])
         extracted_texts = []
 
-        for message in messages:
-            for item in message.get("content", []):
-                if item["type"] == "file":
-                    file_url = item["file"]["url"]
-                    file_name = item["file"].get("name", "file")
-                    mime_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+        for file in files:
+            content_url = file["url"] + "/content"
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(content_url)
+                response.raise_for_status()
+                content = response.content
 
-                    async with httpx.AsyncClient(timeout=30) as client:
-                        response = await client.get(file_url)
-                        response.raise_for_status()
-                        content = response.content
+            mime_type = file.get("mime_type") or mimetypes.guess_type(file.get("name", ""))[0]
 
-                    if mime_type == "application/pdf":
-                        doc = fitz.open(stream=content, filetype="pdf")
-                        text = "\n".join([page.get_text() for page in doc])
-                        extracted_texts.append(text)
+            if mime_type == "application/pdf":
+                doc = fitz.open(stream=content, filetype="pdf")
+                text = "\n".join([page.get_text() for page in doc])
+                extracted_texts.append(text)
 
-                    elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-                        with open("temp.docx", "wb") as f:
-                            f.write(content)
-                        text = docx2txt.process("temp.docx")
-                        os.remove("temp.docx")
-                        extracted_texts.append(text)
+            elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                with open("temp.docx", "wb") as f:
+                    f.write(content)
+                text = docx2txt.process("temp.docx")
+                os.remove("temp.docx")
+                extracted_texts.append(text)
 
-                elif item["type"] == "image_url":
-                    image_url = item["image_url"]["url"]
-                    detail = item["image_url"].get("detail", "auto")
-                    if image_url.startswith("data:image/"):  # base64
-                        header, base64_data = image_url.split(",", 1)
-                        mime_type = header.split(";")[0].split(":")[1]
-                        image_bytes = base64.b64decode(base64_data)
+            elif mime_type and mime_type.startswith("image/"):
+                image = Image.open(io.BytesIO(content))
+                from openai import OpenAI
+                client = OpenAI(api_key=self.valves.OPENAI_API_KEY)
+                base64_image = base64.b64encode(content).decode("utf-8")
+                ocr_response = client.chat.completions.create(
+                    model=self.valves.MODEL_ID,
+                    messages=[
+                        {"role": "user", "content": [
+                            {"type": "text", "text": "Распознай текст на изображении."},
+                            {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}}
+                        ]}
+                    ]
+                )
+                image_text = ocr_response.choices[0].message.content.strip()
+                extracted_texts.append(image_text)
 
-                        from openai import OpenAI
-                        client = OpenAI(api_key=self.valves.OPENAI_API_KEY)
-                        ocr_response = client.chat.completions.create(
-                            model="gpt-4o",
-                            messages=[{
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": "Распознай текст на изображении."},
-                                    {"type": "image_url", "image_url": {"url": image_url, "detail": detail}}
-                                ]
-                            }]
-                        )
-                        image_text = ocr_response.choices[0].message.content.strip()
-                        extracted_texts.append(image_text)
-
+        # Добавляем извлечённый текст
         body["file_text"] = "\n".join(extracted_texts)
+
+        # ✅ Обязательная проверка для OpenWebUI
+        if "messages" not in body or not isinstance(body["messages"], list):
+            raise ValueError("Field 'messages' is required and must be a list.")
+        if "model" not in body or not isinstance(body["model"], str):
+            raise ValueError("Field 'model' is required and must be a string.")
+
+        logging.info("✅ inlet completed successfully.")
         return body
+
 
 
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Iterator[str]:
