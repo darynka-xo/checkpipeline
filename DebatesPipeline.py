@@ -193,4 +193,8 @@ class Pipeline:
                 for i, link in enumerate(search_result["citations"], 1):
                     yield f"\n[{i}] {link}"
     
-        return asyncio.run(self.make_request_with_retry(stream_model))
+        if body.get("stream", True):
+            return asyncio.run(self.make_request_with_retry(stream_model))
+        else:
+            full_response = "".join(asyncio.run(self.make_request_with_retry(stream_model)))
+            return full_response
