@@ -108,7 +108,21 @@ class Pipeline:
         except Exception as e:
             logging.error(f"Search API error: {e}")
             return {"search_required": False, "context": "", "citations": []}
-
+        
+    async def call_deep_extract_api(self, prompt: str, citations: List[str]) -> Dict[str, Any]:
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(
+                    self.valves.SEARCH_API_URL.replace("/check_and_search",
+                                                       "/deep_extract_and_analyze"),
+                    json={"prompt": prompt, "citations": citations, "pipeline": "LawExp"}
+                )
+                resp.raise_for_status()
+                return resp.json()
+        except Exception as e:
+            logging.error(f"DeepExtract API error: {e}")
+            return {}
+        
     def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict
     ) -> Iterator[str]:
@@ -139,7 +153,13 @@ class Pipeline:
 
 - Есть ли дубли, противоречия или риски.
 - Рекомендации для уточнения/согласования.
-"""
+
+### 📊 Сравнительная таблица (ОБЯЗАТЕЛЬНО)
+
+| № | Статья (новый закон) | Дублирующая норма | Источник | История правок | Комментарий |
+|---|----------------------|-------------------|----------|----------------|-------------|
+
+Ссылаемся **только** на статьи, которые указаны в блоке 📘"""
 
         search_result = asyncio.run(self.call_search_api(user_message))
         deep_ctx = {}
@@ -152,8 +172,17 @@ class Pipeline:
                 )
             )
         enriched_prompt = user_message
-        if search_result["search_required"] and search_result["context"]:
-            enriched_prompt += "\n\nКонтекст из найденных официальных источников:\n" + search_result["context"]
+        if search_result["search_required"]:
+            if search_result["context"]:
+                enriched_prompt += ("\n\n📚 Контекст из официальных источников:\n"
+                                    f"{search_result['context']}")
+
+            deep = self.call_deep_extract_api(user_message,
+                                                   search_result.get("citations", []))
+            if deep.get("legal_context"):
+                enriched_prompt += ("\n\n📘 Подтверждённые нормы закона "
+                                    "(указывай строго их, не выдумывай):\n"
+                                    f"{deep['legal_context']}")
         if deep_ctx.get("legal_context"):
             enriched_prompt += "\n\n📘 Конкретные нормы и история правок:\n" + deep_ctx["legal_context"]
 
