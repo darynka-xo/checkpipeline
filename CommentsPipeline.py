@@ -46,14 +46,14 @@ class Pipeline:
                     raise
                 await asyncio.sleep(2 ** attempt)
 
-    async def web_search_with_prompt(self, full_prompt: str) -> str:
+    async def web_search_with_prompt(self, query: str, prompt: str) -> str:
         try:
-            response = self.client.responses.create(
+            search_results = self.client.responses.create(
                 model=self.valves.MODEL_ID,
                 tools=[{"type": "web_search_preview"}],
-                input=full_prompt
+                input=f"{prompt}\n\nПроанализируй комментарии граждан по теме: {query}"
             )
-            return response.output_text
+            return search_results.output_text
         except Exception as e:
             logging.error(f"❌ Ошибка генерации с web_search_preview: {e}")
             return "❌ Ошибка генерации ответа. Попробуйте ещё раз."
@@ -103,6 +103,8 @@ class Pipeline:
 
         body["file_text"] = "\n".join(extracted)
         return body
+
+
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Iterator[str]:
         if body.get("file_text"):
             user_message += "\n\nТекст из прикреплённых документов:\n" + body["file_text"]
@@ -172,8 +174,7 @@ class Pipeline:
 """
 
         async def _generate() -> str:
-            full_prompt = f"{system_msg}\n\nПользовательский ввод:\n{user_message}"
-            return await self.web_search_with_prompt(full_prompt)
+            return await self.web_search_with_prompt(user_message, system_msg)
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
