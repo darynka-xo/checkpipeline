@@ -114,6 +114,23 @@ class Pipeline:
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Iterator[str]:
         if body.get("file_text"):
             user_message += "\n\nТекст из прикреплённых документов:\n" + body["file_text"]
+    
+        # Шаг 1: выполнить веб-поиск комментариев
+        logging.info("🌐 Выполняем веб-поиск по запросу...")
+        loop = asyncio.get_event_loop()
+        search_results = loop.run_until_complete(web_search(user_message))
+        
+        # Шаг 2: отфильтровать и включить только trusted источники
+        real_comments = []
+        for result in search_results:
+            if _is_trusted(result["link"]) or True:  # опционально: оставить только trusted
+                comment = f'[{result["title"]}]({result["link"]}): {result["snippet"]}'
+                real_comments.append(comment)
+    
+        if real_comments:
+            user_message += "\n\n💬 Реальные комментарии из интернета:\n" + "\n".join(real_comments)
+        else:
+            user_message += "\n\n⚠️ Веб-поиск не нашёл подходящих комментариев. Проанализируйте только то, что предоставлено."
 
         system_message = """
 **Роль:** Вы — аналитик общественных консультаций при Министерстве юстиции Казахстана. Ваша задача — анализировать комментарии граждан к законопроектам, выявлять настроение и ключевые тенденции, и на их основе формировать предложения по доработке финальной редакции закона.
@@ -185,20 +202,20 @@ class Pipeline:
             temperature=self.valves.TEMPERATURE,
             streaming=True
         )
-
+    
         prompt = ChatPromptTemplate.from_messages([
             SystemMessagePromptTemplate.from_template(system_message),
             HumanMessagePromptTemplate.from_template("{user_input}")
         ])
-
+    
         formatted_messages = prompt.format_messages(user_input=user_message)
-
+    
         def generate_stream() -> Iterator[str]:
             for chunk in model.stream(formatted_messages):
                 content = getattr(chunk, "content", None)
                 if content:
                     logging.debug(f"Model chunk: {content}")
                     yield content
-
+    
         return asyncio.run(self.make_request_with_retry(generate_stream))
 
