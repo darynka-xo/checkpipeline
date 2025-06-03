@@ -2,7 +2,8 @@ import logging
 import sys
 import os
 import asyncio
-from typing import List, Iterator, Callable
+import re
+from typing import List, Iterator, Callable, Dict
 from pydantic import BaseModel
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
@@ -10,6 +11,23 @@ from openai import OpenAI
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
+
+async def web_search(query: str) -> List[Dict[str, str]]:
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        response = client.responses.create(
+            model="gpt-4.1",
+            tools=[{"type": "web_search_preview"}],
+            input=query
+        )
+        return [{
+            "title": "Поиск OpenAI",
+            "link": "https://www.google.com/search?q=" + query.replace(" ", "+"),
+            "snippet": response.output_text
+        }]
+    except Exception as e:
+        logging.warning(f"OpenAI web_search_preview error: {e}")
+        return []
 
 class Pipeline:
     class Valves(BaseModel):
@@ -21,7 +39,6 @@ class Pipeline:
     def __init__(self):
         self.name = "Public Consultation Comment Analyzer"
         self.valves = self.Valves()
-        self.client = OpenAI(api_key=self.valves.OPENAI_API_KEY)
 
     async def on_startup(self):
         logging.info("Pipeline is warming up...")
@@ -38,49 +55,6 @@ class Pipeline:
                 if attempt + 1 == retries:
                     raise
                 await asyncio.sleep(2 ** attempt)
-
-        async def web_search_summary(self, query: str) -> str:
-            try:
-                search_query = (
-                    f"Комментарии граждан и реакция на законопроект о {query} "
-                    "site:eotinish.kz OR site:gov.kz OR site:adilet.zan.kz "
-                    "OR site:legalacts.egov.kz OR site:online.zakon.kz "
-                    "OR site:inform.kz OR site:zakon.kz OR site:liter.kz OR site:kazpravda.kz"
-                )
-    
-                response = self.client.responses.create(
-                    model="gpt-4.1",
-                    tools=[{"type": "web_search_preview"}],
-                    input=search_query
-                )
-                text = response.output_text.strip()
-                sources = []
-    
-                if hasattr(response, 'citations') and response.citations:
-                    for src in response.citations:
-                        title = src.get("title", "Источник")
-                        url = src.get("url", "")
-                        sources.append(f"- [{title}]({url})")
-                else:
-                    sources += [
-                        "- [eotinish.kz](https://eotinish.kz)",
-                        "- [adilet.zan.kz](https://adilet.zan.kz)",
-                        "- [legalacts.egov.kz](https://legalacts.egov.kz)",
-                        "- [online.zakon.kz](https://online.zakon.kz)",
-                        "- [inform.kz](https://inform.kz)",
-                        "- [zakon.kz](https://zakon.kz)"
-                    ]
-    
-                return (
-                    text +
-                    "\n\n🔗 Использованные источники:\n" +
-                    "\n".join(sources)
-                )
-    
-            except Exception as e:
-                logging.warning(f"Web search error: {e}")
-                return "📡 Не удалось получить комментарии из интернета."
-
 
     def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict
@@ -120,7 +94,7 @@ class Pipeline:
 
 ### **2. По каждому комментарию:**
 
-#### **Комментарий: "[вставить комментарий]"**
+#### **Комментарий: \"[вставить комментарий]\"**
 🔹 **Тональность:** (позитивный / негативный / нейтральный)  
 🔹 **Анализ:**  
 [Краткий разбор сути, мотивации, логики, интересов]
@@ -150,6 +124,15 @@ class Pipeline:
 - Не избегайте статистики: указывайте проценты, количество, динамику
 """
 
+        async def prepare_input() -> str:
+            search_results = await web_search(user_message)
+            if search_results:
+                combined_snippets = "\n\n".join(f"Источник: {res['link']}\n{res['snippet']}" for res in search_results)
+                return user_message + f"\n\nНайденные комментарии из открытых источников:\n{combined_snippets}"
+            return user_message
+
+        prompt_input = asyncio.run(prepare_input())
+
         model = ChatOpenAI(
             api_key=self.valves.OPENAI_API_KEY,
             model=self.valves.MODEL_ID,
@@ -162,32 +145,13 @@ class Pipeline:
             HumanMessagePromptTemplate.from_template("{user_input}")
         ])
 
-        async def generate_augmented_input():
-            web_summary = await self.web_search_summary(f"Комментарии граждан по теме: {user_message}")
-            enriched = (
-                user_message +
-                "\n\n📡 Комментарии из интернета:\n" +
-                web_summary +
-                "\n\n🔗 Использованные источники (предварительный обзор):\n"
-                "- Google Поиск\n"
-                "- Обсуждения в социальных сетях и форумах\n"
-                "- Новостные сайты и комментарии к статьям\n"
-                "- Платформы для общественных обсуждений (например, eotinish.kz, gov.kz)\n"
-                "(Детальная конкретизация источников может быть получена по ссылке в тексте или при последующем анализе)"
-            )
+        formatted_messages = prompt.format_messages(user_input=prompt_input)
 
-            formatted_messages = prompt.format_messages(user_input=enriched)
+        def generate_stream() -> Iterator[str]:
+            for chunk in model.stream(formatted_messages):
+                content = getattr(chunk, "content", None)
+                if content:
+                    logging.debug(f"Model chunk: {content}")
+                    yield content
 
-            def generate_stream() -> Iterator[str]:
-                for chunk in model.stream(formatted_messages):
-                    content = getattr(chunk, "content", None)
-                    if content:
-                        logging.debug(f"Model chunk: {content}")
-                        yield content
-
-            return await self.make_request_with_retry(generate_stream)
-
-        return asyncio.run(generate_augmented_input())
-
-
-        return asyncio.run(generate_augmented_input())
+        return asyncio.run(self.make_request_with_retry(generate_stream))
