@@ -2,213 +2,200 @@ import logging
 import sys
 import os
 import asyncio
-from typing import List, Iterator, Callable, Any, Dict
-from pydantic import BaseModel
+import re
 import httpx
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.prompts import SystemMessagePromptTemplate, HumanMessagePromptTemplate
+import mimetypes
+import base64
+import io
+from typing import List, Iterator, Callable, Any, Dict
 
+from pydantic import BaseModel
+from langchain_openai import ChatOpenAI
+from langchain.tools import Tool
+from langchain.agents import initialize_agent, AgentType
+from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+
+# Optional imports for file‑text extraction
+from PIL import Image
+import fitz                     # PyMuPDF
+import docx2txt                 # .docx -> text
+
+###############################################################################
+# Logging
+###############################################################################
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
 
+###############################################################################
+# Helper tools for the LLM agent
+###############################################################################
+SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
+TRUSTED_DOMAINS = [
+    "akorda.kz", "senate.parlam.kz", "primeminister.kz",
+    "otyrys.prk.kz", "senate-zan.prk.kz", "lib.prk.kz",
+    "online.zakon.kz", "adilet.zan.kz", "legalacts.egov.kz",
+    "egov.kz", "eotinish.kz"
+]
 
+def _is_trusted(url: str) -> bool:
+    return any(d in url for d in TRUSTED_DOMAINS)
+
+def clean_html(text: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", text)  # remove tags
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+async def web_search(query: str) -> List[Dict[str, str]]:
+    """Return up to 10 organic Google results via Serper."""
+    headers = {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post("https://google.serper.dev/search", json={"q": query, "num": 10}, headers=headers)
+        r.raise_for_status()
+        items = r.json().get("organic", [])
+    # keep only trusted
+    return [{"title": it["title"], "link": it["link"], "snippet": it["snippet"]}
+            for it in items if _is_trusted(it["link"])]
+
+async def open_url(url: str) -> str:
+    """Fetch a URL and return cleaned text (first 15k chars)."""
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get(url)
+        r.raise_for_status()
+        return clean_html(r.text)[:15000]
+
+# Wrap as LangChain tools
+SEARCH_TOOL = Tool.from_function(
+    name="web_search",
+    description="Найди официальные документы и статьи казахстанских гос‑сайтов по заданному запросу (на русском). Возвращает список объектов {title, link, snippet}.",
+    func=web_search,
+)
+FETCH_TOOL = Tool.from_function(
+    name="open_url",
+    description="Скачай HTML страницы по URL и верни чистый текст без тегов. Использовать только для ссылок с гос‑сайтов.",
+    func=open_url,
+)
+
+###############################################################################
+# The OpenWebUI Pipeline
+###############################################################################
 class Pipeline:
     class Valves(BaseModel):
         MODEL_ID: str = "gpt-4o"
         TEMPERATURE: float = 0.3
         MAX_TOKENS: int = 1800
         OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-        SEARCH_API_URL: str = os.getenv("SEARCH_API_URL", "http://localhost:8008/check_and_search")
 
     def __init__(self):
         self.name = "Эксперт по предложениям"
         self.valves = self.Valves()
 
+        # init LLM + tools‑powered agent
+        llm = ChatOpenAI(
+            api_key=self.valves.OPENAI_API_KEY,
+            model=self.valves.MODEL_ID,
+            temperature=self.valves.TEMPERATURE,
+            max_tokens=self.valves.MAX_TOKENS,
+        )
+        self.agent = initialize_agent(
+            [SEARCH_TOOL, FETCH_TOOL],
+            llm,
+            agent=AgentType.OPENAI_FUNCTIONS,
+            verbose=False,
+            max_iterations=6,
+        )
+
+    # ---------------------------------------------------------------------
+    # OpenWebUI life‑cycle hooks
+    # ---------------------------------------------------------------------
     async def on_startup(self):
-        logging.info("Pipeline is warming up...")
+        logging.info("LawExp pipeline warming up…")
 
     async def on_shutdown(self):
-        logging.info("Pipeline is shutting down...")
+        logging.info("LawExp pipeline shutting down…")
 
+    # ------------------------------------------------------------------
+    # Helper: retry wrapper for generators (for streaming UI)
+    # ------------------------------------------------------------------
     async def make_request_with_retry(self, fn: Callable[[], Iterator[str]], retries=3) -> Iterator[str]:
         for attempt in range(retries):
             try:
                 return fn()
             except Exception as e:
-                logging.error(f"Attempt {attempt + 1} failed: {e}")
+                logging.error(f"Attempt {attempt+1} failed: {e}")
                 if attempt + 1 == retries:
                     raise
                 await asyncio.sleep(2 ** attempt)
+
+    # ------------------------------------------------------------------
+    # inlet: handle uploaded files → OCR/extract text
+    # ------------------------------------------------------------------
     async def inlet(self, body: dict, user: dict) -> dict:
         import json
+        logging.info("📥 Inlet body:\n" + json.dumps(body, indent=2, ensure_ascii=False))
 
-        logging.info(f"📥 Received inlet body:\n{json.dumps(body, indent=2, ensure_ascii=False)}")
-        files = body.get("files", [])
-        extracted_texts = []
-
-        for file in files:
-            content_url = file["url"] + "/content"
-            async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.get(content_url)
-                response.raise_for_status()
-                content = response.content
-
-            mime_type = file.get("mime_type") or mimetypes.guess_type(file.get("name", ""))[0]
-
-            if mime_type == "application/pdf":
+        extracted = []
+        for f in body.get("files", []):
+            content_url = f["url"] + "/content"
+            async with httpx.AsyncClient(timeout=30) as c:
+                resp = await c.get(content_url)
+                resp.raise_for_status()
+                content = resp.content
+            mime = f.get("mime_type") or mimetypes.guess_type(f.get("name", ""))[0]
+            if mime == "application/pdf":
                 doc = fitz.open(stream=content, filetype="pdf")
-                text = "\n".join([page.get_text() for page in doc])
-                extracted_texts.append(text)
-
-            elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-                with open("temp.docx", "wb") as f:
-                    f.write(content)
-                text = docx2txt.process("temp.docx")
-                os.remove("temp.docx")
-                extracted_texts.append(text)
-
-            elif mime_type and mime_type.startswith("image/"):
-                image = Image.open(io.BytesIO(content))
+                extracted.append("\n".join(p.get_text() for p in doc))
+            elif mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                with open("_tmp.docx", "wb") as tmp:
+                    tmp.write(content)
+                extracted.append(docx2txt.process("_tmp.docx"))
+                os.remove("_tmp.docx")
+            elif mime and mime.startswith("image/"):
+                # cheap OCR via OpenAI Vision
                 from openai import OpenAI
                 client = OpenAI(api_key=self.valves.OPENAI_API_KEY)
-                base64_image = base64.b64encode(content).decode("utf-8")
-                ocr_response = client.chat.completions.create(
+                b64 = base64.b64encode(content).decode()
+                res = client.chat.completions.create(
                     model=self.valves.MODEL_ID,
-                    messages=[
-                        {"role": "user", "content": [
-                            {"type": "text", "text": "Распознай текст на изображении."},
-                            {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}}
-                        ]}
-                    ]
+                    messages=[{"role": "user", "content": [
+                        {"type": "text", "text": "Распознай текст на изображении."},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+                    ]}]
                 )
-                image_text = ocr_response.choices[0].message.content.strip()
-                extracted_texts.append(image_text)
-
-        # Добавляем извлечённый текст
-        body["file_text"] = "\n".join(extracted_texts)
-
-        # ✅ Обязательная проверка для OpenWebUI
-        if "messages" not in body or not isinstance(body["messages"], list):
-            raise ValueError("Field 'messages' is required and must be a list.")
-        if "model" not in body or not isinstance(body["model"], str):
-            raise ValueError("Field 'model' is required and must be a string.")
-
-        logging.info("✅ inlet completed successfully.")
+                extracted.append(res.choices[0].message.content.strip())
+        body["file_text"] = "\n".join(extracted)
         return body
-    async def call_search_api(self, prompt: str) -> Dict[str, Any]:
+
+    # ------------------------------------------------------------------
+    # main pipe: build system prompt -> delegate to LLM agent (search + analyse)
+    # ------------------------------------------------------------------
+    def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Iterator[str]:
+        # attach text from uploaded files
+        if body.get("file_text"):
+            user_message += "\n\nТекст из прикреплённых документов:\n" + body["file_text"]
+
+        # system instructions for the agent
+        system_msg = (
+            "Ты — ИИ‑эксперт по сравнительному правовому анализу. "
+            "Получив черновик законопроекта, ты должен: \n"
+            "1. Найти действующие нормы в казахстанском праве, пересекающиеся или дублирующие положения проекта.\n"
+            "2. Собрать краткую историю правок этих норм (если есть на adilet).\n"
+            "3. Вывести 📊 таблицу: | № | Статья (новый) | Дублирующая норма | Источник | История правок | Комментарий |\n"
+            "4. В конце дать ⚖️ Итог с рекомендациями.\n"
+            "Используй инструменты web_search и open_url когда нужно. Не придумывай статьи — только реальные." )
+
+        async def _generate() -> str:
+            # we concatenate system + user as a single agent prompt
+            prompt = f"{system_msg}\n\n<проект>\n{user_message}"
+            return await self.agent.arun(prompt)
+
+        # run synchronously from sync context
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.post(
-                    self.valves.SEARCH_API_URL,
-                    json={"prompt": prompt, "pipeline": "LawExp"}
-                )
-                response.raise_for_status()
-                return response.json()
-        except Exception as e:
-            logging.error(f"Search API error: {e}")
-            return {"search_required": False, "context": "", "citations": []}
-        
-    async def call_deep_extract_api(self, prompt: str, citations: List[str]) -> Dict[str, Any]:
-        try:
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(
-                    self.valves.SEARCH_API_URL.replace("/check_and_search",
-                                                       "/deep_extract_and_analyze"),
-                    json={"prompt": prompt, "citations": citations, "pipeline": "LawExp"}
-                )
-                resp.raise_for_status()
-                return resp.json()
-        except Exception as e:
-            logging.error(f"DeepExtract API error: {e}")
-            return {}
-        
-    def pipe(
-        self, user_message: str, model_id: str, messages: List[dict], body: dict
-    ) -> Iterator[str]:
-        file_text = body.get("file_text", "")
-        if file_text:
-            user_message += f"\n\nТекст из прикреплённых документов:\n{file_text}"
-        system_message = """
-**Роль:** Вы — ИИ-эксперт по правовой экспертизе законодательства.
+            result = loop.run_until_complete(_generate())
+        finally:
+            loop.close()
 
-**Задача:**
-1. Провести анализ предложенного законопроекта или инициативы.
-2. Проверить, не дублирует ли он положения действующего законодательства.
-3. Выявить существующие нормы, которые уже реализуют те же меры.
-4. Дать рекомендации по устранению дублирования или корректировке инициативы.
-
-**Формат ответа:**
-
-### 📄 Краткое содержание инициативы
-
-- [1–2 предложения]
-
-### 🔍 Анализ по блокам
-1. **Налоговые меры** — что уже есть в Налоговом кодексе, пересечения.
-2. **Гранты и субсидии** — есть ли программы поддержки.
-3. **Регистрация бизнеса** — дублирование с Кодексом о предпринимательстве и Egov.
-
-### ⚖️ Заключение
-
-- Есть ли дубли, противоречия или риски.
-- Рекомендации для уточнения/согласования.
-
-### 📊 Сравнительная таблица (ОБЯЗАТЕЛЬНО)
-
-| № | Статья (новый закон) | Дублирующая норма | Источник | История правок | Комментарий |
-|---|----------------------|-------------------|----------|----------------|-------------|
-
-Ссылаемся **только** на статьи, которые указаны в блоке 📘"""
-
-        search_result = asyncio.run(self.call_search_api(user_message))
-        deep_ctx = {}
-        if search_result["search_required"] and search_result["citations"]:
-            deep_ctx = asyncio.run(
-                self.call_search_api(  # 👈 переиспользуем метод, но меняем path
-                    user_message.replace(self.valves.SEARCH_API_URL,
-                    self.valves.SEARCH_API_URL.replace("/check_and_search",
-                    "/deep_extract_and_analyze")),
-                )
-            )
-        enriched_prompt = user_message
-        if search_result["search_required"]:
-            if search_result["context"]:
-                enriched_prompt += ("\n\n📚 Контекст из официальных источников:\n"
-                                    f"{search_result['context']}")
-
-            deep = self.call_deep_extract_api(user_message,
-                                                   search_result.get("citations", []))
-            if deep.get("legal_context"):
-                enriched_prompt += ("\n\n📘 Подтверждённые нормы закона "
-                                    "(указывай строго их, не выдумывай):\n"
-                                    f"{deep['legal_context']}")
-        if deep_ctx.get("legal_context"):
-            enriched_prompt += "\n\n📘 Конкретные нормы и история правок:\n" + deep_ctx["legal_context"]
-
-        model = ChatOpenAI(
-            api_key=self.valves.OPENAI_API_KEY,
-            model=self.valves.MODEL_ID,
-            temperature=self.valves.TEMPERATURE,
-            streaming=True,
-            max_tokens=self.valves.MAX_TOKENS
-        )
-
-        prompt = ChatPromptTemplate.from_messages([
-            SystemMessagePromptTemplate.from_template(system_message),
-            HumanMessagePromptTemplate.from_template("{user_input}")
-        ])
-        formatted_messages = prompt.format_messages(user_input=enriched_prompt)
-
-        def generate_stream() -> Iterator[str]:
-            for chunk in model.stream(formatted_messages):
-                content = getattr(chunk, "content", None)
-                if content:
-                    yield content
-
-            if search_result["search_required"] and search_result["citations"]:
-                yield "\n\n### 📚 Использованные источники:"
-                for i, link in enumerate(search_result["citations"], 1):
-                    yield f"\n[{i}] {link}"
-
-        return asyncio.run(self.make_request_with_retry(generate_stream))
+        def _stream_once():
+            yield result
+        return _stream_once()
