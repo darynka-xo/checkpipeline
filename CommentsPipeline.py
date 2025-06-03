@@ -6,6 +6,7 @@ from typing import List, Iterator, Callable
 from pydantic import BaseModel
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from openai import OpenAI
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
@@ -20,6 +21,7 @@ class Pipeline:
     def __init__(self):
         self.name = "Public Consultation Comment Analyzer"
         self.valves = self.Valves()
+        self.client = OpenAI(api_key=self.valves.OPENAI_API_KEY)
 
     async def on_startup(self):
         logging.info("Pipeline is warming up...")
@@ -37,10 +39,21 @@ class Pipeline:
                     raise
                 await asyncio.sleep(2 ** attempt)
 
+    async def web_search_summary(self, query: str) -> str:
+        try:
+            response = self.client.responses.create(
+                model="gpt-4.1",
+                tools=[{"type": "web_search_preview"}],
+                input=query
+            )
+            return response.output_text.strip()
+        except Exception as e:
+            logging.warning(f"Web search error: {e}")
+            return ""
+
     def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict
     ) -> Iterator[str]:
-
         system_message = """
 **Роль:** Вы — аналитик общественных консультаций при Министерстве юстиции Казахстана. Ваша задача — анализировать комментарии граждан к законопроектам, выявлять настроение и ключевые тенденции, и на их основе формировать предложения по доработке финальной редакции закона.
 
@@ -105,7 +118,6 @@ class Pipeline:
 - Не избегайте статистики: указывайте проценты, количество, динамику
 """
 
-
         model = ChatOpenAI(
             api_key=self.valves.OPENAI_API_KEY,
             model=self.valves.MODEL_ID,
@@ -118,13 +130,18 @@ class Pipeline:
             HumanMessagePromptTemplate.from_template("{user_input}")
         ])
 
-        formatted_messages = prompt.format_messages(user_input=user_message)
+        async def generate_augmented_input():
+            web_summary = await self.web_search_summary(f"Комментарии граждан по теме: {user_message}")
+            enriched = user_message + "\n\n" + "📡 Комментарии из интернета:\n" + web_summary
+            formatted_messages = prompt.format_messages(user_input=enriched)
 
-        def generate_stream() -> Iterator[str]:
-            for chunk in model.stream(formatted_messages):
-                content = getattr(chunk, "content", None)
-                if content:
-                    logging.debug(f"Model chunk: {content}")
-                    yield content
+            def generate_stream() -> Iterator[str]:
+                for chunk in model.stream(formatted_messages):
+                    content = getattr(chunk, "content", None)
+                    if content:
+                        logging.debug(f"Model chunk: {content}")
+                        yield content
 
-        return asyncio.run(self.make_request_with_retry(generate_stream))
+            return await self.make_request_with_retry(generate_stream)
+
+        return asyncio.run(generate_augmented_input())
