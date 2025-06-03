@@ -171,11 +171,20 @@ class Pipeline:
 
         async def _generate() -> str:
             try:
-                prompt = f"{system_msg}\n\n<проект>\n{user_message}"
-                return await self.agent.arun(prompt)
+                messages_payload = [
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_message}
+                ]
+                response = self.client.chat.completions.create(
+                    model=self.valves.MODEL_ID,
+                    tools=[{"type": "web_search_preview"}],
+                    messages=messages_payload
+                )
+                return response.choices[0].message.content
             except Exception as e:
                 logging.error(f"❌ Ошибка генерации: {e}")
                 return "❌ Ошибка генерации ответа. Попробуйте ещё раз."
+
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
