@@ -41,7 +41,7 @@ async def web_search(query: str) -> List[Dict[str, str]]:
     try:
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         response = client.responses.create(
-            model="gpt-4.1",
+            model="gpt-4o",
             tools=[{"type": "web_search_preview"}],
             input=query
         )
@@ -78,7 +78,7 @@ FETCH_TOOL = Tool.from_function(
 
 class Pipeline:
     class Valves(BaseModel):
-        MODEL_ID: str = "gpt-4.1"
+        MODEL_ID: str = "gpt-4o"
         TEMPERATURE: float = 0.3
         MAX_TOKENS: int = 1800
         OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
@@ -171,20 +171,11 @@ class Pipeline:
 
         async def _generate() -> str:
             try:
-                messages_payload = [
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": user_message}
-                ]
-                response = self.client.chat.completions.create(
-                    model=self.valves.MODEL_ID,
-                    tools=[{"type": "web_search_preview"}],
-                    messages=messages_payload
-                )
-                return response.choices[0].message.content
+                prompt = f"{system_msg}\n\n<проект>\n{user_message}"
+                return await self.agent.arun(prompt)
             except Exception as e:
                 logging.error(f"❌ Ошибка генерации: {e}")
                 return "❌ Ошибка генерации ответа. Попробуйте ещё раз."
-
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
