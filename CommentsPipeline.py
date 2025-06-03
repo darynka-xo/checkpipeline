@@ -39,17 +39,48 @@ class Pipeline:
                     raise
                 await asyncio.sleep(2 ** attempt)
 
-    async def web_search_summary(self, query: str) -> str:
-        try:
-            response = self.client.responses.create(
-                model="gpt-4.1",
-                tools=[{"type": "web_search_preview"}],
-                input=query
-            )
-            return response.output_text.strip()
-        except Exception as e:
-            logging.warning(f"Web search error: {e}")
-            return ""
+        async def web_search_summary(self, query: str) -> str:
+            try:
+                search_query = (
+                    f"Комментарии граждан и реакция на законопроект о {query} "
+                    "site:eotinish.kz OR site:gov.kz OR site:adilet.zan.kz "
+                    "OR site:legalacts.egov.kz OR site:online.zakon.kz "
+                    "OR site:inform.kz OR site:zakon.kz OR site:liter.kz OR site:kazpravda.kz"
+                )
+    
+                response = self.client.responses.create(
+                    model="gpt-4.1",
+                    tools=[{"type": "web_search_preview"}],
+                    input=search_query
+                )
+                text = response.output_text.strip()
+                sources = []
+    
+                if hasattr(response, 'citations') and response.citations:
+                    for src in response.citations:
+                        title = src.get("title", "Источник")
+                        url = src.get("url", "")
+                        sources.append(f"- [{title}]({url})")
+                else:
+                    sources += [
+                        "- [eotinish.kz](https://eotinish.kz)",
+                        "- [adilet.zan.kz](https://adilet.zan.kz)",
+                        "- [legalacts.egov.kz](https://legalacts.egov.kz)",
+                        "- [online.zakon.kz](https://online.zakon.kz)",
+                        "- [inform.kz](https://inform.kz)",
+                        "- [zakon.kz](https://zakon.kz)"
+                    ]
+    
+                return (
+                    text +
+                    "\n\n🔗 Использованные источники:\n" +
+                    "\n".join(sources)
+                )
+    
+            except Exception as e:
+                logging.warning(f"Web search error: {e}")
+                return "📡 Не удалось получить комментарии из интернета."
+
 
     def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict
