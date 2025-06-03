@@ -63,6 +63,20 @@ class Pipeline:
             logging.error(f"Search API error: {e}")
             return {"search_required": False, "context": "", "citations": []}
 
+    async def call_deep_extract_api(self, prompt: str, citations: List[str]) -> str:
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.post(
+                    self.valves.SEARCH_API_URL.replace("/check_and_search", "/deep_extract_and_analyze"),
+                    json={"prompt": prompt, "citations": citations, "pipeline": "DebatePipeline"}
+                )
+                response.raise_for_status()
+                return response.json().get("legal_context", "")
+        except Exception as e:
+            logging.error(f"Deep extract API error: {e}")
+            return ""
+
+
     async def inlet(self, body: dict, user: dict) -> dict:
         import json
 
@@ -199,7 +213,11 @@ class Pipeline:
             user_message += "\n\nКонтекст из официальных источников:\n" + search_result["context"]
         if legal_refs["legal_snippets"]:
             user_message += "\n\n📘 Найденные нормы закона:\n" + "\n".join(f"- {line}" for line in legal_refs["legal_snippets"])
-
+        deep_legal_context = ""
+        if search_result["search_required"] and search_result["citations"]:
+            deep_legal_context = asyncio.run(self.call_deep_extract_api(user_message, search_result["citations"]))
+            if deep_legal_context:
+                user_message += "\n\n📘 Подтверждённые нормы закона:\n" + deep_legal_context
         model = ChatOpenAI(
             api_key=self.valves.OPENAI_API_KEY,
             model=self.valves.MODEL_ID,
