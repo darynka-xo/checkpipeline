@@ -81,41 +81,44 @@ class Pipeline:
         extracted_texts = []
         if files:
             for file in files:
-                content_url = file["url"] + "/content"
-                async with httpx.AsyncClient(timeout=30) as client:
-                    response = await client.get(content_url)
-                    content = response.content
-
-                mime_type = file.get("mime_type") or mimetypes.guess_type(file.get("name", ""))[0]
-
-                if mime_type == "application/pdf":
+                url = f.get("url", "")
+                content = None
+        
+                if url.startswith("http://") or url.startswith("https://"):
+                    content_url = url + "/content"
+                    async with httpx.AsyncClient(timeout=30) as c:
+                        resp = await c.get(content_url)
+                        resp.raise_for_status()
+                        content = resp.content
+                elif url.startswith("data:"):
+                    # Пример: data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,...
+                    header, b64data = url.split(",", 1)
+                    content = base64.b64decode(b64data)
+                else:
+                    logging.warning(f"⚠️ Unsupported or missing URL scheme: {url}")
+                    continue
+        
+                mime = f.get("mime_type") or mimetypes.guess_type(f.get("name", ""))[0]
+                if mime == "application/pdf":
                     doc = fitz.open(stream=content, filetype="pdf")
-                    text = "\n".join([page.get_text() for page in doc])
-                    extracted_texts.append(text)
-
-                elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-                    with open("temp.docx", "wb") as f:
-                        f.write(content)
-                    text = docx2txt.process("temp.docx")
-                    os.remove("temp.docx")
-                    extracted_texts.append(text)
-
-                elif mime_type and mime_type.startswith("image/"):
-                    base64_image = base64.b64encode(content).decode("utf-8")
-                    client = OpenAI(api_key=self.valves.OPENAI_API_KEY)
-                    ocr_response = client.chat.completions.create(
+                    extracted.append("\n".join(p.get_text() for p in doc))
+                elif mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                    with open("_tmp.docx", "wb") as tmp:
+                        tmp.write(content)
+                    extracted.append(docx2txt.process("_tmp.docx"))
+                    os.remove("_tmp.docx")
+                elif mime and mime.startswith("image/"):
+                    b64 = base64.b64encode(content).decode()
+                    res = self.client.chat.completions.create(
                         model=self.valves.MODEL_ID,
-                        messages=[
-                            {"role": "user", "content": [
-                                {"type": "text", "text": "Распознай текст на изображении."},
-                                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}}
-                            ]}
-                        ]
+                        messages=[{"role": "user", "content": [
+                            {"type": "text", "text": "Распознай текст на изображении."},
+                            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+                        ]}]
                     )
-                    image_text = ocr_response.choices[0].message.content.strip()
-                    extracted_texts.append(image_text)
-
-            body["file_text"] = "\n".join(extracted_texts)
+                    extracted.append(res.choices[0].message.content.strip())
+        
+            body["file_text"] = "\n".join(extracted)
         else:
             body["file_text"] = ""
         return body
