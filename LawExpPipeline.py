@@ -101,7 +101,8 @@ class Pipeline:
             llm,
             agent=AgentType.OPENAI_FUNCTIONS,
             verbose=False,
-            max_iterations=6,
+            max_iterations=12,
+            max_execution_time=120
         )
 
     # ---------------------------------------------------------------------
