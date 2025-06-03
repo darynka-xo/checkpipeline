@@ -120,6 +120,18 @@ class Pipeline:
         logging.info("✅ inlet completed successfully.")
         return body
 
+    async def call_legal_reference_api(self, prompt: str) -> Dict[str, Any]:
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.post(
+                    self.valves.SEARCH_API_URL.replace("/check_and_search", "/extract_legal_references"),
+                    json={"prompt": prompt, "pipeline": "DebatePipeline"}
+                )
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            logging.error(f"Legal Reference API error: {e}")
+            return {"legal_snippets": [], "citations": []}
 
 
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Iterator[str]:
@@ -173,18 +185,21 @@ class Pipeline:
 | ... | ... | ... | ... |
 
 **Правила для таблицы:**
-- Включить 5-7 ключевых аргументов из анализа
-- Указывать конкретные источники (законы, НПА, статьи)
-- Кратко формулировать суть поддержки и возражений
-- Таблица должна быть итоговым резюме всего анализа
+- Выделить в аргументах конкретные упомянутые нормы: статьи, пункты, законы, кодексы
+- Указать название и номер статьи (например, «статья 9 Закона „О персональных данных“»)
+- Отражать источник не просто как "Законопроект", а как конкретный закон/кодекс
+- Обосновывать позицию сторон с опорой на эти нормы
 
 БЕЗ ПОЛНОГО АНАЛИЗА И ИТОГОВОЙ ТАБЛИЦЫ ОТВЕТ НЕДОПУСТИМ!
 """
 
         search_result = asyncio.run(self.call_search_api(user_message))
+        legal_refs = asyncio.run(self.call_legal_reference_api(user_message))
         if search_result["search_required"] and search_result["context"]:
             user_message += "\n\nКонтекст из официальных источников:\n" + search_result["context"]
-    
+        if legal_refs["legal_snippets"]:
+            user_message += "\n\n📘 Найденные нормы закона:\n" + "\n".join(f"- {line}" for line in legal_refs["legal_snippets"])
+
         model = ChatOpenAI(
             api_key=self.valves.OPENAI_API_KEY,
             model=self.valves.MODEL_ID,
