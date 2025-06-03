@@ -138,7 +138,10 @@ class Pipeline:
 
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Iterator[str]:
         if body.get("file_text"):
-            user_message += "\n\nТекст из прикреплённых документов:\n" + body["file_text"]
+            if not user_message.strip():
+                user_message = body["file_text"]
+            else:
+                user_message += "\n\nТекст из прикреплённых документов:\n" + body["file_text"]
 
         system_msg = (
             "Ты — ИИ-аналитик по правовым вопросам, владеющий казахским и русским языками. Твоя задача — провести сравнительный анализ между предлагаемым законопроектом и действующими казахстанскими законами.\n"
