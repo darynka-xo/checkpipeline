@@ -79,60 +79,50 @@ class Pipeline:
 
     async def inlet(self, body: dict, user: dict) -> dict:
         import json
-
-        logging.info(f"📥 Received inlet body:\n{json.dumps(body, indent=2, ensure_ascii=False)}")
-        files = body.get("files", [])
-        extracted_texts = []
-
-        for file in files:
-            content_url = file["url"] + "/content"
-            async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.get(content_url)
-                response.raise_for_status()
-                content = response.content
-
-            mime_type = file.get("mime_type") or mimetypes.guess_type(file.get("name", ""))[0]
-
-            if mime_type == "application/pdf":
+        logging.info("📥 Inlet body:\n" + json.dumps(body, indent=2, ensure_ascii=False))
+    
+        extracted = []
+        for f in body.get("files", []):
+            url = f.get("url", "")
+            content = None
+    
+            if url.startswith("http://") or url.startswith("https://"):
+                content_url = url + "/content"
+                async with httpx.AsyncClient(timeout=30) as c:
+                    resp = await c.get(content_url)
+                    resp.raise_for_status()
+                    content = resp.content
+            elif url.startswith("data:"):
+                # Пример: data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,...
+                header, b64data = url.split(",", 1)
+                content = base64.b64decode(b64data)
+            else:
+                logging.warning(f"⚠️ Unsupported or missing URL scheme: {url}")
+                continue
+    
+            mime = f.get("mime_type") or mimetypes.guess_type(f.get("name", ""))[0]
+            if mime == "application/pdf":
                 doc = fitz.open(stream=content, filetype="pdf")
-                text = "\n".join([page.get_text() for page in doc])
-                extracted_texts.append(text)
-
-            elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-                with open("temp.docx", "wb") as f:
-                    f.write(content)
-                text = docx2txt.process("temp.docx")
-                os.remove("temp.docx")
-                extracted_texts.append(text)
-
-            elif mime_type and mime_type.startswith("image/"):
-                image = Image.open(io.BytesIO(content))
-                from openai import OpenAI
-                client = OpenAI(api_key=self.valves.OPENAI_API_KEY)
-                base64_image = base64.b64encode(content).decode("utf-8")
-                ocr_response = client.chat.completions.create(
+                extracted.append("\n".join(p.get_text() for p in doc))
+            elif mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                with open("_tmp.docx", "wb") as tmp:
+                    tmp.write(content)
+                extracted.append(docx2txt.process("_tmp.docx"))
+                os.remove("_tmp.docx")
+            elif mime and mime.startswith("image/"):
+                b64 = base64.b64encode(content).decode()
+                res = self.client.chat.completions.create(
                     model=self.valves.MODEL_ID,
-                    messages=[
-                        {"role": "user", "content": [
-                            {"type": "text", "text": "Распознай текст на изображении."},
-                            {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}}
-                        ]}
-                    ]
+                    messages=[{"role": "user", "content": [
+                        {"type": "text", "text": "Распознай текст на изображении."},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+                    ]}]
                 )
-                image_text = ocr_response.choices[0].message.content.strip()
-                extracted_texts.append(image_text)
-
-        # Добавляем извлечённый текст
-        body["file_text"] = "\n".join(extracted_texts)
-
-        # ✅ Обязательная проверка для OpenWebUI
-        if "messages" not in body or not isinstance(body["messages"], list):
-            raise ValueError("Field 'messages' is required and must be a list.")
-        if "model" not in body or not isinstance(body["model"], str):
-            raise ValueError("Field 'model' is required and must be a string.")
-
-        logging.info("✅ inlet completed successfully.")
+                extracted.append(res.choices[0].message.content.strip())
+    
+        body["file_text"] = "\n".join(extracted)
         return body
+
 
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Iterator[str]:
         file_text = body.get("file_text", "")
