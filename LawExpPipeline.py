@@ -47,14 +47,20 @@ def clean_html(text: str) -> str:
 async def web_search(query: str) -> List[Dict[str, str]]:
     headers = {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=20, http2=False) as client:
             r = await client.post(
                 "https://google.serper.dev/search",
                 json={"q": query, "num": 10},
                 headers=headers,
             )
             r.raise_for_status()
-            items = r.json().get("organic", [])
+            try:
+                data = r.json()
+            except Exception as json_err:
+                logging.warning(f"JSON decode error from Serper: {json_err}")
+                return []
+
+            items = data.get("organic", [])
     except Exception as e:
         logging.warning(f"Serper error for '{query}': {e}")
         return []
