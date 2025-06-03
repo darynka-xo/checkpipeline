@@ -10,57 +10,13 @@ import io
 from typing import List, Iterator, Callable, Dict
 
 from pydantic import BaseModel
+from openai import OpenAI
 from PIL import Image
 import fitz  # PyMuPDF
 import docx2txt
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
-
-TRUSTED_DOMAINS = [
-    "open.zakon.kz", "legalacts.egov.kz", "adilet.zan.kz",
-    "online.zakon.kz", "egov.kz", "eotinish.kz", "tengrinews.kz",
-    "kursiv.media", "inbusiness.kz", "kapital.kz"
-]
-
-def _is_trusted(url: str) -> bool:
-    return any(d in url for d in TRUSTED_DOMAINS)
-
-def clean_html(text: str) -> str:
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-async def web_search(query: str) -> List[Dict[str, str]]:
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        response = client.responses.create(
-            model="gpt-4.1",
-            tools=[{"type": "web_search_preview"}],
-            input=query
-        )
-        return [{
-            "title": "Общественные комментарии",
-            "link": "https://www.google.com/search?q=" + query.replace(" ", "+"),
-            "snippet": response.output_text
-        }]
-    except Exception as e:
-        logging.warning(f"OpenAI web_search_preview error: {e}")
-        return []
-
-async def open_url(url: str) -> str:
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; PublicConsultBot/1.0)"}
-    try:
-        async with httpx.AsyncClient(timeout=30, headers=headers) as client:
-            r = await client.get(url, follow_redirects=True)
-            r.raise_for_status()
-            return clean_html(r.text)[:15000]
-    except Exception as e:
-        logging.warning(f"open_url error for {url}: {e}")
-        return f"__FETCH_ERROR__: {e}"
 
 class Pipeline:
     class Valves(BaseModel):
@@ -75,10 +31,10 @@ class Pipeline:
         self.client = OpenAI(api_key=self.valves.OPENAI_API_KEY)
 
     async def on_startup(self):
-        logging.info("Pipeline is warming up...")
+        logging.info("Pipeline is warming up…")
 
     async def on_shutdown(self):
-        logging.info("Pipeline is shutting down...")
+        logging.info("Pipeline is shutting down…")
 
     async def make_request_with_retry(self, fn: Callable[[], Iterator[str]], retries=3) -> Iterator[str]:
         for attempt in range(retries):
@@ -90,16 +46,41 @@ class Pipeline:
                     raise
                 await asyncio.sleep(2 ** attempt)
 
+    async def web_search_with_prompt(self, full_prompt: str) -> str:
+        try:
+            response = self.client.responses.create(
+                model=self.valves.MODEL_ID,
+                tools=[{"type": "web_search_preview"}],
+                input=full_prompt
+            )
+            return response.output_text
+        except Exception as e:
+            logging.error(f"❌ Ошибка генерации с web_search_preview: {e}")
+            return "❌ Ошибка генерации ответа. Попробуйте ещё раз."
+
     async def inlet(self, body: dict, user: dict) -> dict:
-        logging.info("📥 Inlet body:")
+        import json
+        logging.info("📥 Inlet body:\n" + json.dumps(body, indent=2, ensure_ascii=False))
 
         extracted = []
         for f in body.get("files", []):
-            content_url = f["url"] + "/content"
-            async with httpx.AsyncClient(timeout=30) as c:
-                resp = await c.get(content_url)
-                resp.raise_for_status()
-                content = resp.content
+            url = f.get("url", "")
+            content = None
+
+            if url.startswith("http://") or url.startswith("https://"):
+                content_url = url + "/content"
+                async with httpx.AsyncClient(timeout=30) as c:
+                    resp = await c.get(content_url)
+                    resp.raise_for_status()
+                    content = resp.content
+            elif url.startswith("data:"):
+                # Пример: data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,...
+                header, b64data = url.split(",", 1)
+                content = base64.b64decode(b64data)
+            else:
+                logging.warning(f"⚠️ Unsupported or missing URL scheme: {url}")
+                continue
+
             mime = f.get("mime_type") or mimetypes.guess_type(f.get("name", ""))[0]
             if mime == "application/pdf":
                 doc = fitz.open(stream=content, filetype="pdf")
@@ -119,26 +100,14 @@ class Pipeline:
                     ]}]
                 )
                 extracted.append(res.choices[0].message.content.strip())
+
         body["file_text"] = "\n".join(extracted)
-
-        if body.get("query"):
-            search_results = await web_search(body["query"])
-            search_texts = []
-            for res in search_results:
-                if _is_trusted(res["link"]):
-                    html = await open_url(res["link"])
-                    search_texts.append(f"Источник: {res['link']}\n{html}")
-            body["search_comments"] = "\n---\n".join(search_texts)
-
         return body
-
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Iterator[str]:
         if body.get("file_text"):
             user_message += "\n\nТекст из прикреплённых документов:\n" + body["file_text"]
-        if body.get("search_comments"):
-            user_message += "\n\nПроанализируй и классифицируй следующие общественные комментарии:\n" + body["search_comments"]
 
-        system_message = """
+        system_msg = """
 **Роль:** Вы — аналитик общественных консультаций при Министерстве юстиции Казахстана. Ваша задача — анализировать комментарии граждан к законопроектам, выявлять настроение и ключевые тенденции, и на их основе формировать предложения по доработке финальной редакции закона.
 
 ---
@@ -172,7 +141,7 @@ class Pipeline:
 
 ### **2. По каждому комментарию:**
 
-#### **Комментарий: "[вставить комментарий]"**
+#### **Комментарий: \"[вставить комментарий]\"**
 🔹 **Тональность:** (позитивный / негативный / нейтральный)  
 🔹 **Анализ:**  
 [Краткий разбор сути, мотивации, логики, интересов]
@@ -203,16 +172,8 @@ class Pipeline:
 """
 
         async def _generate() -> str:
-            try:
-                response = self.client.responses.create(
-                    model="gpt-4.1",
-                    tools=[{"type": "web_search_preview"}],
-                    input=f"{system_msg}\n\n<проект>\n{user_message}"
-                )
-                return response.output_text
-            except Exception as e:
-                logging.error(f"❌ Ошибка генерации: {e}")
-                return "❌ Ошибка генерации ответа. Попробуйте ещё раз."
+            full_prompt = f"{system_msg}\n\nПользовательский ввод:\n{user_message}"
+            return await self.web_search_with_prompt(full_prompt)
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
