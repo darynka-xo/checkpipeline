@@ -38,19 +38,25 @@ async def web_search(query: str) -> List[Dict[str, str]]:
     try:
         from openai import OpenAI
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        response = client.responses.create(
+
+        response = await asyncio.wait_for(client.responses.create(
             model="gpt-4.1",
             tools=[{"type": "web_search_preview"}],
             input=query
-        )
+        ), timeout=15)
+
         return [{
             "title": "Поиск OpenAI",
             "link": "https://www.google.com/search?q=" + query.replace(" ", "+"),
             "snippet": response.output_text
         }]
-    except Exception as e:
-        logging.warning(f"OpenAI web_search_preview error: {e}")
+    except asyncio.TimeoutError:
+        logging.warning("❌ web_search timeout!")
         return []
+    except Exception as e:
+        logging.warning(f"❌ web_search error: {e}")
+        return []
+
 
 class Pipeline:
     class Valves(BaseModel):
