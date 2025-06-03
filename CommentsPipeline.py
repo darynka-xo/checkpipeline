@@ -18,6 +18,14 @@ import docx2txt
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
 
+TRUSTED_DOMAINS = [
+    "tengrinews.kz", "kursiv.media", "kapital.kz", "inbusiness.kz",
+    "adilet.zan.kz", "online.zakon.kz", "legalacts.egov.kz", "egov.kz"
+]
+
+def _is_trusted(url: str) -> bool:
+    return any(domain in url for domain in TRUSTED_DOMAINS)
+
 class Pipeline:
     class Valves(BaseModel):
         MODEL_ID: str = "gpt-4.1"
@@ -36,51 +44,16 @@ class Pipeline:
     async def on_shutdown(self):
         logging.info("Pipeline is shutting down…")
 
-    async def make_request_with_retry(self, fn: Callable[[], Iterator[str]], retries=3) -> Iterator[str]:
-        for attempt in range(retries):
-            try:
-                return fn()
-            except Exception as e:
-                logging.error(f"Attempt {attempt + 1} failed: {e}")
-                if attempt + 1 == retries:
-                    raise
-                await asyncio.sleep(2 ** attempt)
-
-    async def web_search_with_prompt(self, query: str, prompt: str) -> str:
-        try:
-            search_results = self.client.responses.create(
-                model=self.valves.MODEL_ID,
-                tools=[{"type": "web_search_preview"}],
-                input=f"{prompt}\n\nПроанализируй комментарии граждан по теме: {query}"
-            )
-            return search_results.output_text
-        except Exception as e:
-            logging.error(f"❌ Ошибка генерации с web_search_preview: {e}")
-            return "❌ Ошибка генерации ответа. Попробуйте ещё раз."
-
     async def inlet(self, body: dict, user: dict) -> dict:
-        import json
-        logging.info("📥 Inlet body:\n" + json.dumps(body, indent=2, ensure_ascii=False))
+        logging.info("📥 Inlet body received")
 
         extracted = []
         for f in body.get("files", []):
-            url = f.get("url", "")
-            content = None
-
-            if url.startswith("http://") or url.startswith("https://"):
-                content_url = url + "/content"
-                async with httpx.AsyncClient(timeout=30) as c:
-                    resp = await c.get(content_url)
-                    resp.raise_for_status()
-                    content = resp.content
-            elif url.startswith("data:"):
-                # Пример: data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,...
-                header, b64data = url.split(",", 1)
-                content = base64.b64decode(b64data)
-            else:
-                logging.warning(f"⚠️ Unsupported or missing URL scheme: {url}")
-                continue
-
+            content_url = f["url"] + "/content"
+            async with httpx.AsyncClient(timeout=30) as c:
+                resp = await c.get(content_url)
+                resp.raise_for_status()
+                content = resp.content
             mime = f.get("mime_type") or mimetypes.guess_type(f.get("name", ""))[0]
             if mime == "application/pdf":
                 doc = fitz.open(stream=content, filetype="pdf")
@@ -100,16 +73,27 @@ class Pipeline:
                     ]}]
                 )
                 extracted.append(res.choices[0].message.content.strip())
-
         body["file_text"] = "\n".join(extracted)
         return body
 
+    async def trusted_web_search(self, query: str) -> str:
+        try:
+            response = self.client.responses.create(
+                model=self.valves.MODEL_ID,
+                tools=[{"type": "web_search_preview"}],
+                input=f"Проанализируй комментарии граждан по теме: {query}. Обработай комментарии только из официальных и новостных источников Казахстана, включая tengrinews.kz, kursiv.media, kapital.kz, legalacts.egov.kz, adilet.zan.kz. Приведи конкретные примеры комментариев, статистику, и чёткие рекомендации для корректировки законопроекта."
+            )
+            return response.output_text
+        except Exception as e:
+            logging.error(f"❌ Ошибка web search: {e}")
+            return "❌ Ошибка генерации ответа. Попробуйте ещё раз."
 
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Iterator[str]:
         if body.get("file_text"):
             user_message += "\n\nТекст из прикреплённых документов:\n" + body["file_text"]
 
-        system_msg = """
+        async def _generate() -> str:
+            return await self.trusted_web_search(f"""
 **Роль:** Вы — аналитик общественных консультаций при Министерстве юстиции Казахстана. Ваша задача — анализировать комментарии граждан к законопроектам, выявлять настроение и ключевые тенденции, и на их основе формировать предложения по доработке финальной редакции закона.
 
 ---
@@ -171,10 +155,8 @@ class Pipeline:
 - Не выдумывайте мнения — только на основе фактического текста
 - Если комментариев мало — анализируйте качественно
 - Не избегайте статистики: указывайте проценты, количество, динамику
-"""
 
-        async def _generate() -> str:
-            return await self.web_search_with_prompt(user_message, system_msg)
+Тема: {user_message}""")
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
