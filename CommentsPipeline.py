@@ -45,28 +45,15 @@ class Pipeline:
         logging.info("Pipeline is shutting down…")
 
     async def inlet(self, body: dict, user: dict) -> dict:
-        import json
-        logging.info("📥 Inlet body:\n" + json.dumps(body, indent=2, ensure_ascii=False))
-    
+        logging.info("📥 Inlet body received")
+
         extracted = []
         for f in body.get("files", []):
-            url = f.get("url", "")
-            content = None
-    
-            if url.startswith("http://") or url.startswith("https://"):
-                content_url = url + "/content"
-                async with httpx.AsyncClient(timeout=30) as c:
-                    resp = await c.get(content_url)
-                    resp.raise_for_status()
-                    content = resp.content
-            elif url.startswith("data:"):
-                # Пример: data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,...
-                header, b64data = url.split(",", 1)
-                content = base64.b64decode(b64data)
-            else:
-                logging.warning(f"⚠️ Unsupported or missing URL scheme: {url}")
-                continue
-    
+            content_url = f["url"] + "/content"
+            async with httpx.AsyncClient(timeout=30) as c:
+                resp = await c.get(content_url)
+                resp.raise_for_status()
+                content = resp.content
             mime = f.get("mime_type") or mimetypes.guess_type(f.get("name", ""))[0]
             if mime == "application/pdf":
                 doc = fitz.open(stream=content, filetype="pdf")
@@ -86,30 +73,27 @@ class Pipeline:
                     ]}]
                 )
                 extracted.append(res.choices[0].message.content.strip())
-    
         body["file_text"] = "\n".join(extracted)
         return body
 
-    def trusted_web_search(self, prompt: str) -> Iterator[str]:
+    async def trusted_web_search(self, query: str) -> str:
         try:
-            completion = self.client.chat.completions.create(
+            response = self.client.responses.create(
                 model=self.valves.MODEL_ID,
-                messages=[{"role": "user", "content": prompt}],
-                stream=True
+                tools=[{"type": "web_search_preview"}],
+                input=f"Проанализируй комментарии граждан по теме: {query}. Обработай комментарии только из официальных и новостных источников Казахстана, включая tengrinews.kz, kursiv.media, kapital.kz, legalacts.egov.kz, adilet.zan.kz. Приведи конкретные примеры комментариев, статистику, и чёткие рекомендации для корректировки законопроекта."
             )
-            for chunk in completion:
-                content = chunk.choices[0].delta.get("content")
-                if content:
-                    yield content
+            return response.output_text
         except Exception as e:
-            logging.error(f"❌ Ошибка stream генерации: {e}")
-            yield "❌ Ошибка генерации ответа. Попробуйте ещё раз."
+            logging.error(f"❌ Ошибка web search: {e}")
+            return "❌ Ошибка генерации ответа. Попробуйте ещё раз."
 
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Iterator[str]:
         if body.get("file_text"):
             user_message += "\n\nТекст из прикреплённых документов:\n" + body["file_text"]
 
-        system_prompt = f"""
+        async def _generate() -> str:
+            return await self.trusted_web_search(f"""
 **Роль:** Вы — аналитик общественных консультаций при Министерстве юстиции Казахстана. Ваша задача — анализировать комментарии граждан к законопроектам, выявлять настроение и ключевые тенденции, и на их основе формировать предложения по доработке финальной редакции закона.
 
 ---
@@ -164,11 +148,10 @@ class Pipeline:
 
 ---
 
-### **4. Источники комментариев**
-- Укажите гиперссылками, откуда были взяты комментарии
+### **4. Источники**
+- ОБЯЗАТЕЛЬНО укажите ССЫЛКИ на использованные источники.
 
 ---
-
 ## 🧠 Инструкции:
 
 - Стиль: официальный, уважительный, аналитический
@@ -177,6 +160,8 @@ class Pipeline:
 - Если комментариев мало — анализируйте качественно
 - Не избегайте статистики: указывайте проценты, количество, динамику
 
-Тема: {user_message}
-"""
-        return self.trusted_web_search(system_prompt)
+Тема: {user_message}""")
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(_generate())
