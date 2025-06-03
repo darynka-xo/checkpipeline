@@ -10,14 +10,10 @@ import io
 from typing import List, Iterator, Callable, Dict
 
 from pydantic import BaseModel
-from langchain_openai import ChatOpenAI
-from langchain.tools import Tool
-from langchain.agents import initialize_agent, AgentType
-
+from openai import OpenAI
 from PIL import Image
 import fitz
 import docx2txt
-from openai import OpenAI
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
@@ -65,17 +61,6 @@ async def open_url(url: str) -> str:
         logging.warning(f"open_url error for {url}: {e}")
         return f"__FETCH_ERROR__: {e}"
 
-SEARCH_TOOL = Tool.from_function(
-    name="web_search",
-    description="Найди официальные документы и статьи казахстанских гос‑сайтов по заданному запросу (на русском или казахском). Возвращает краткий вывод GPT с поиском.",
-    func=web_search,
-)
-FETCH_TOOL = Tool.from_function(
-    name="open_url",
-    description="Скачай HTML страницы по URL и верни чистый текст без тегов. Использовать только для ссылок с гос‑сайтов.",
-    func=open_url,
-)
-
 class Pipeline:
     class Valves(BaseModel):
         MODEL_ID: str = "gpt-4o"
@@ -86,22 +71,7 @@ class Pipeline:
     def __init__(self):
         self.name = "Эксперт по предложениям"
         self.valves = self.Valves()
-
-        llm = ChatOpenAI(
-            api_key=self.valves.OPENAI_API_KEY,
-            model=self.valves.MODEL_ID,
-            temperature=self.valves.TEMPERATURE,
-            max_tokens=self.valves.MAX_TOKENS,
-        )
-        self.agent = initialize_agent(
-            [SEARCH_TOOL, FETCH_TOOL],
-            llm,
-            agent=AgentType.OPENAI_FUNCTIONS,
-            verbose=False,
-            max_iterations=12,
-            max_execution_time=120,
-            early_stopping_method="generate"
-        )
+        self.client = OpenAI(api_key=self.valves.OPENAI_API_KEY)
 
     async def on_startup(self):
         logging.info("LawExp pipeline warming up…")
@@ -140,9 +110,8 @@ class Pipeline:
                 extracted.append(docx2txt.process("_tmp.docx"))
                 os.remove("_tmp.docx")
             elif mime and mime.startswith("image/"):
-                client = OpenAI(api_key=self.valves.OPENAI_API_KEY)
                 b64 = base64.b64encode(content).decode()
-                res = client.chat.completions.create(
+                res = self.client.chat.completions.create(
                     model=self.valves.MODEL_ID,
                     messages=[{"role": "user", "content": [
                         {"type": "text", "text": "Распознай текст на изображении."},
@@ -184,7 +153,6 @@ class Pipeline:
             except Exception as e:
                 logging.error(f"❌ Ошибка генерации: {e}")
                 return "❌ Ошибка генерации ответа. Попробуйте ещё раз."
-
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
