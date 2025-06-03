@@ -217,7 +217,11 @@ class Pipeline:
         if search_result["search_required"] and search_result["citations"]:
             deep_legal_context = asyncio.run(self.call_deep_extract_api(user_message, search_result["citations"]))
             if deep_legal_context:
-                user_message += "\n\n📘 Подтверждённые нормы закона:\n" + deep_legal_context
+                user_message += (
+                    "\n\n📘 Подтверждённые нормы закона (из официальных источников):\n"
+                    f"{deep_legal_context}\n"
+                    "\n❗️Указывай ТОЛЬКО статьи, которые есть в этом списке. НЕ придумывай!"
+                )
         model = ChatOpenAI(
             api_key=self.valves.OPENAI_API_KEY,
             model=self.valves.MODEL_ID,
