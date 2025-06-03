@@ -7,7 +7,13 @@ from pydantic import BaseModel
 import httpx
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
-
+import json
+import base64
+import mimetypes
+import io
+import fitz
+from PIL import Image
+import docx2txt
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
 
@@ -68,59 +74,48 @@ class Pipeline:
 
     async def inlet(self, body: dict, user: dict) -> dict:
         import json
-        import base64
-        import mimetypes
-        import io
-        import fitz
-        from PIL import Image
-        import docx2txt
-        from openai import OpenAI
-
-        logging.info(f"📥 Received inlet body:\n{json.dumps(body, indent=2, ensure_ascii=False)}")
-        files = body.get("files", [])
-        extracted_texts = []
-        if files:
-            for file in files:
-                url = file.get("url", "")
-                content = None
-        
-                if url.startswith("http://") or url.startswith("https://"):
-                    content_url = url + "/content"
-                    async with httpx.AsyncClient(timeout=30) as c:
-                        resp = await c.get(content_url)
-                        resp.raise_for_status()
-                        content = resp.content
-                elif url.startswith("data:"):
-                    # Пример: data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,...
-                    header, b64data = url.split(",", 1)
-                    content = base64.b64decode(b64data)
-                else:
-                    logging.warning(f"⚠️ Unsupported or missing URL scheme: {url}")
-                    continue
-        
-                mime = file.get("mime_type") or mimetypes.guess_type(file.get("name", ""))[0]
-                if mime == "application/pdf":
-                    doc = fitz.open(stream=content, filetype="pdf")
-                    extracted.append("\n".join(p.get_text() for p in doc))
-                elif mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-                    with open("_tmp.docx", "wb") as tmp:
-                        tmp.write(content)
-                    extracted.append(docx2txt.process("_tmp.docx"))
-                    os.remove("_tmp.docx")
-                elif mime and mime.startswith("image/"):
-                    b64 = base64.b64encode(content).decode()
-                    res = self.client.chat.completions.create(
-                        model=self.valves.MODEL_ID,
-                        messages=[{"role": "user", "content": [
-                            {"type": "text", "text": "Распознай текст на изображении."},
-                            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
-                        ]}]
-                    )
-                    extracted.append(res.choices[0].message.content.strip())
-        
-            body["file_text"] = "\n".join(extracted)
-        else:
-            body["file_text"] = ""
+        logging.info("📥 Inlet body:\n" + json.dumps(body, indent=2, ensure_ascii=False))
+    
+        extracted = []
+        for f in body.get("files", []):
+            url = f.get("url", "")
+            content = None
+    
+            if url.startswith("http://") or url.startswith("https://"):
+                content_url = url + "/content"
+                async with httpx.AsyncClient(timeout=30) as c:
+                    resp = await c.get(content_url)
+                    resp.raise_for_status()
+                    content = resp.content
+            elif url.startswith("data:"):
+                # Пример: data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,...
+                header, b64data = url.split(",", 1)
+                content = base64.b64decode(b64data)
+            else:
+                logging.warning(f"⚠️ Unsupported or missing URL scheme: {url}")
+                continue
+    
+            mime = f.get("mime_type") or mimetypes.guess_type(f.get("name", ""))[0]
+            if mime == "application/pdf":
+                doc = fitz.open(stream=content, filetype="pdf")
+                extracted.append("\n".join(p.get_text() for p in doc))
+            elif mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                with open("_tmp.docx", "wb") as tmp:
+                    tmp.write(content)
+                extracted.append(docx2txt.process("_tmp.docx"))
+                os.remove("_tmp.docx")
+            elif mime and mime.startswith("image/"):
+                b64 = base64.b64encode(content).decode()
+                res = self.client.chat.completions.create(
+                    model=self.valves.MODEL_ID,
+                    messages=[{"role": "user", "content": [
+                        {"type": "text", "text": "Распознай текст на изображении."},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+                    ]}]
+                )
+                extracted.append(res.choices[0].message.content.strip())
+    
+        body["file_text"] = "\n".join(extracted)
         return body
 
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Iterator[str]:
