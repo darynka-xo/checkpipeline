@@ -45,22 +45,37 @@ def clean_html(text: str) -> str:
     return text.strip()
 
 async def web_search(query: str) -> List[Dict[str, str]]:
-    """Return up to 10 organic Google results via Serper."""
     headers = {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}
-    async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.post("https://google.serper.dev/search", json={"q": query, "num": 10}, headers=headers)
-        r.raise_for_status()
-        items = r.json().get("organic", [])
-    # keep only trusted
-    return [{"title": it["title"], "link": it["link"], "snippet": it["snippet"]}
-            for it in items if _is_trusted(it["link"])]
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(
+                "https://google.serper.dev/search",
+                json={"q": query, "num": 10},
+                headers=headers,
+            )
+            r.raise_for_status()
+            items = r.json().get("organic", [])
+    except Exception as e:
+        logging.warning(f"Serper error for '{query}': {e}")
+        return []
+    return [
+        {"title": it["title"], "link": it["link"], "snippet": it.get("snippet", "")}
+        for it in items
+        if _is_trusted(it["link"])
+    ]
+
 
 async def open_url(url: str) -> str:
-    """Fetch a URL and return cleaned text (first 15k chars)."""
-    async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.get(url)
-        r.raise_for_status()
-        return clean_html(r.text)[:15000]
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; LawExpBot/1.0)"}
+    try:
+        async with httpx.AsyncClient(timeout=30, headers=headers) as client:
+            r = await client.get(url, follow_redirects=True)
+            r.raise_for_status()
+            return clean_html(r.text)[:15000]
+    except Exception as e:
+        logging.warning(f"open_url error for {url}: {e}")
+        return f"__FETCH_ERROR__: {e}"
+
 
 # Wrap as LangChain tools
 SEARCH_TOOL = Tool.from_function(
