@@ -17,11 +17,11 @@ from langchain.agents import initialize_agent, AgentType
 from PIL import Image
 import fitz
 import docx2txt
+from openai import OpenAI
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
 
-SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
 TRUSTED_DOMAINS = [
     "akorda.kz", "senate.parlam.kz", "primeminister.kz",
     "otyrys.prk.kz", "senate-zan.prk.kz", "lib.prk.kz",
@@ -38,29 +38,21 @@ def clean_html(text: str) -> str:
     return text.strip()
 
 async def web_search(query: str) -> List[Dict[str, str]]:
-    headers = {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}
     try:
-        async with httpx.AsyncClient(timeout=20, http2=False) as client:
-            r = await client.post(
-                "https://google.serper.dev/search",
-                json={"q": query, "num": 10},
-                headers=headers,
-            )
-            r.raise_for_status()
-            try:
-                data = r.json()
-            except Exception as json_err:
-                logging.warning(f"JSON decode error from Serper: {json_err}")
-                return []
-            items = data.get("organic", [])
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        response = client.responses.create(
+            model="gpt-4o",
+            tools=[{"type": "web_search_preview"}],
+            input=query
+        )
+        return [{
+            "title": "Поиск OpenAI",
+            "link": "https://www.google.com/search?q=" + query.replace(" ", "+"),
+            "snippet": response.output_text
+        }]
     except Exception as e:
-        logging.warning(f"Serper error for '{query}': {e}")
+        logging.warning(f"OpenAI web_search_preview error: {e}")
         return []
-    return [
-        {"title": it["title"], "link": it["link"], "snippet": it.get("snippet", "")}
-        for it in items
-        if _is_trusted(it["link"])
-    ]
 
 async def open_url(url: str) -> str:
     headers = {"User-Agent": "Mozilla/5.0 (compatible; LawExpBot/1.0)"}
@@ -75,7 +67,7 @@ async def open_url(url: str) -> str:
 
 SEARCH_TOOL = Tool.from_function(
     name="web_search",
-    description="Найди официальные документы и статьи казахстанских гос‑сайтов по заданному запросу (на русском). Возвращает список объектов {title, link, snippet}.",
+    description="Найди официальные документы и статьи казахстанских гос‑сайтов по заданному запросу (на русском). Возвращает краткий вывод GPT с поиском.",
     func=web_search,
 )
 FETCH_TOOL = Tool.from_function(
@@ -148,7 +140,6 @@ class Pipeline:
                 extracted.append(docx2txt.process("_tmp.docx"))
                 os.remove("_tmp.docx")
             elif mime and mime.startswith("image/"):
-                from openai import OpenAI
                 client = OpenAI(api_key=self.valves.OPENAI_API_KEY)
                 b64 = base64.b64encode(content).decode()
                 res = client.chat.completions.create(
