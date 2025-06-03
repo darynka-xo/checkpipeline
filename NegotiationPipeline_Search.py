@@ -81,7 +81,7 @@ class Pipeline:
         extracted_texts = []
         if files:
             for file in files:
-                url = f.get("url", "")
+                url = file.get("url", "")
                 content = None
         
                 if url.startswith("http://") or url.startswith("https://"):
@@ -98,7 +98,7 @@ class Pipeline:
                     logging.warning(f"⚠️ Unsupported or missing URL scheme: {url}")
                     continue
         
-                mime = f.get("mime_type") or mimetypes.guess_type(f.get("name", ""))[0]
+                mime = file.get("mime_type") or mimetypes.guess_type(file.get("name", ""))[0]
                 if mime == "application/pdf":
                     doc = fitz.open(stream=content, filetype="pdf")
                     extracted.append("\n".join(p.get_text() for p in doc))
