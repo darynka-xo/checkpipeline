@@ -41,7 +41,7 @@ async def web_search(query: str) -> List[Dict[str, str]]:
     try:
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         response = client.responses.create(
-            model="gpt-4o",
+            model="gpt-4.1",
             tools=[{"type": "web_search_preview"}],
             input=query
         )
@@ -78,7 +78,7 @@ FETCH_TOOL = Tool.from_function(
 
 class Pipeline:
     class Valves(BaseModel):
-        MODEL_ID: str = "gpt-4o"
+        MODEL_ID: str = "gpt-4.1"
         TEMPERATURE: float = 0.3
         MAX_TOKENS: int = 1800
         OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
