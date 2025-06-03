@@ -7,13 +7,12 @@ import httpx
 import mimetypes
 import base64
 import io
-from typing import List, Iterator, Callable, Any, Dict
+from typing import List, Iterator, Callable, Dict
 
 from pydantic import BaseModel
 from langchain_openai import ChatOpenAI
 from langchain.tools import Tool
 from langchain.agents import initialize_agent, AgentType
-from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 
 # Optional imports for file‑text extraction
 from PIL import Image
@@ -102,7 +101,8 @@ class Pipeline:
             agent=AgentType.OPENAI_FUNCTIONS,
             verbose=False,
             max_iterations=12,
-            max_execution_time=120
+            max_execution_time=120,
+            early_stopping_method="generate"  # остановка без ошибок
         )
 
     # ---------------------------------------------------------------------
@@ -167,36 +167,29 @@ class Pipeline:
         return body
 
     # ------------------------------------------------------------------
-    # main pipe: build system prompt -> delegate to LLM agent (search + analyse)
+    # main pipe: build system prompt → delegate to LLM agent
     # ------------------------------------------------------------------
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Iterator[str]:
         # attach text from uploaded files
         if body.get("file_text"):
             user_message += "\n\nТекст из прикреплённых документов:\n" + body["file_text"]
 
-        # system instructions for the agent
+        # system instructions for the agent (NO clarifying questions!)
         system_msg = (
-            "Ты — ИИ‑эксперт по сравнительному правовому анализу. "
-            "Получив черновик законопроекта, ты должен: \n"
+            "Ты — ИИ‑эксперт по сравнительному правовому анализу. Строго соблюдай правила:\n"
+            "• Никогда не задавай пользователю уточняющих вопросов.\n"
+            "• Если данных мало — делай лучшее возможное предположение и продолжай.\n"
+            "• Используй web_search / open_url, но выводи ответ одним сообщением.\n"
+            "Твоя задача:\n"
             "1. Найти действующие нормы в казахстанском праве, пересекающиеся или дублирующие положения проекта.\n"
             "2. Собрать краткую историю правок этих норм (если есть на adilet).\n"
             "3. Вывести 📊 таблицу: | № | Статья (новый) | Дублирующая норма | Источник | История правок | Комментарий |\n"
             "4. В конце дать ⚖️ Итог с рекомендациями.\n"
-            "Используй инструменты web_search и open_url когда нужно. Не придумывай статьи — только реальные." )
+            "Не придумывай статьи — только реальные." )
 
         async def _generate() -> str:
-            # we concatenate system + user as a single agent prompt
             prompt = f"{system_msg}\n\n<проект>\n{user_message}"
             return await self.agent.arun(prompt)
 
-        # run synchronously from sync context
         loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            result = loop.run_until_complete(_generate())
-        finally:
-            loop.close()
-
-        def _stream_once():
-            yield result
-        return _stream_once()
+        asyncio.set
