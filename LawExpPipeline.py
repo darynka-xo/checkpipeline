@@ -14,20 +14,13 @@ from langchain_openai import ChatOpenAI
 from langchain.tools import Tool
 from langchain.agents import initialize_agent, AgentType
 
-# Optional imports for file‑text extraction
 from PIL import Image
-import fitz                     # PyMuPDF
-import docx2txt                 # .docx -> text
+import fitz
+import docx2txt
 
-###############################################################################
-# Logging
-###############################################################################
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
 
-###############################################################################
-# Helper tools for the LLM agent
-###############################################################################
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
 TRUSTED_DOMAINS = [
     "akorda.kz", "senate.parlam.kz", "primeminister.kz",
@@ -40,7 +33,7 @@ def _is_trusted(url: str) -> bool:
     return any(d in url for d in TRUSTED_DOMAINS)
 
 def clean_html(text: str) -> str:
-    text = re.sub(r"<[^>]+>", " ", text)  # remove tags
+    text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
@@ -59,7 +52,6 @@ async def web_search(query: str) -> List[Dict[str, str]]:
             except Exception as json_err:
                 logging.warning(f"JSON decode error from Serper: {json_err}")
                 return []
-
             items = data.get("organic", [])
     except Exception as e:
         logging.warning(f"Serper error for '{query}': {e}")
@@ -69,7 +61,6 @@ async def web_search(query: str) -> List[Dict[str, str]]:
         for it in items
         if _is_trusted(it["link"])
     ]
-
 
 async def open_url(url: str) -> str:
     headers = {"User-Agent": "Mozilla/5.0 (compatible; LawExpBot/1.0)"}
@@ -82,8 +73,6 @@ async def open_url(url: str) -> str:
         logging.warning(f"open_url error for {url}: {e}")
         return f"__FETCH_ERROR__: {e}"
 
-
-# Wrap as LangChain tools
 SEARCH_TOOL = Tool.from_function(
     name="web_search",
     description="Найди официальные документы и статьи казахстанских гос‑сайтов по заданному запросу (на русском). Возвращает список объектов {title, link, snippet}.",
@@ -95,9 +84,6 @@ FETCH_TOOL = Tool.from_function(
     func=open_url,
 )
 
-###############################################################################
-# The OpenWebUI Pipeline
-###############################################################################
 class Pipeline:
     class Valves(BaseModel):
         MODEL_ID: str = "gpt-4o"
@@ -109,7 +95,6 @@ class Pipeline:
         self.name = "Эксперт по предложениям"
         self.valves = self.Valves()
 
-        # init LLM + tools‑powered agent
         llm = ChatOpenAI(
             api_key=self.valves.OPENAI_API_KEY,
             model=self.valves.MODEL_ID,
@@ -123,21 +108,15 @@ class Pipeline:
             verbose=False,
             max_iterations=12,
             max_execution_time=120,
-            early_stopping_method="generate"  # остановка без ошибок
+            early_stopping_method="generate"
         )
 
-    # ---------------------------------------------------------------------
-    # OpenWebUI life‑cycle hooks
-    # ---------------------------------------------------------------------
     async def on_startup(self):
         logging.info("LawExp pipeline warming up…")
 
     async def on_shutdown(self):
         logging.info("LawExp pipeline shutting down…")
 
-    # ------------------------------------------------------------------
-    # Helper: retry wrapper for generators (for streaming UI)
-    # ------------------------------------------------------------------
     async def make_request_with_retry(self, fn: Callable[[], Iterator[str]], retries=3) -> Iterator[str]:
         for attempt in range(retries):
             try:
@@ -148,9 +127,6 @@ class Pipeline:
                     raise
                 await asyncio.sleep(2 ** attempt)
 
-    # ------------------------------------------------------------------
-    # inlet: handle uploaded files → OCR/extract text
-    # ------------------------------------------------------------------
     async def inlet(self, body: dict, user: dict) -> dict:
         import json
         logging.info("📥 Inlet body:\n" + json.dumps(body, indent=2, ensure_ascii=False))
@@ -172,7 +148,6 @@ class Pipeline:
                 extracted.append(docx2txt.process("_tmp.docx"))
                 os.remove("_tmp.docx")
             elif mime and mime.startswith("image/"):
-                # cheap OCR via OpenAI Vision
                 from openai import OpenAI
                 client = OpenAI(api_key=self.valves.OPENAI_API_KEY)
                 b64 = base64.b64encode(content).decode()
@@ -187,15 +162,10 @@ class Pipeline:
         body["file_text"] = "\n".join(extracted)
         return body
 
-    # ------------------------------------------------------------------
-    # main pipe: build system prompt → delegate to LLM agent
-    # ------------------------------------------------------------------
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Iterator[str]:
-        # attach text from uploaded files
         if body.get("file_text"):
             user_message += "\n\nТекст из прикреплённых документов:\n" + body["file_text"]
 
-        # system instructions for the agent (NO clarifying questions!)
         system_msg = (
             "Ты — ИИ‑эксперт по сравнительному правовому анализу. Строго соблюдай правила:\n"
             "• Никогда не задавай пользователю уточняющих вопросов.\n"
@@ -206,11 +176,17 @@ class Pipeline:
             "2. Собрать краткую историю правок этих норм (если есть на adilet).\n"
             "3. Вывести 📊 таблицу: | № | Статья (новый) | Дублирующая норма | Источник | История правок | Комментарий |\n"
             "4. В конце дать ⚖️ Итог с рекомендациями.\n"
-            "Не придумывай статьи — только реальные." )
+            "Не придумывай статьи — только реальные."
+        )
 
         async def _generate() -> str:
-            prompt = f"{system_msg}\n\n<проект>\n{user_message}"
-            return await self.agent.arun(prompt)
+            try:
+                prompt = f"{system_msg}\n\n<проект>\n{user_message}"
+                return await self.agent.arun(prompt)
+            except Exception as e:
+                logging.error(f"❌ Ошибка генерации: {e}")
+                return "❌ Ошибка генерации ответа. Попробуйте ещё раз."
 
         loop = asyncio.new_event_loop()
-        asyncio.set
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(_generate())
