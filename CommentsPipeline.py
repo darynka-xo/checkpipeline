@@ -64,7 +64,7 @@ async def open_url(url: str) -> str:
 
 class Pipeline:
     class Valves(BaseModel):
-        MODEL_ID: str = "gpt-4o"
+        MODEL_ID: str = "gpt-4.1"
         TEMPERATURE: float = 0.5
         MAX_TOKENS: int = 2000
         OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
@@ -72,6 +72,7 @@ class Pipeline:
     def __init__(self):
         self.name = "Public Consultation Comment Analyzer"
         self.valves = self.Valves()
+        self.client = OpenAI(api_key=self.valves.OPENAI_API_KEY)
 
     async def on_startup(self):
         logging.info("Pipeline is warming up...")
@@ -109,10 +110,8 @@ class Pipeline:
                 extracted.append(docx2txt.process("_tmp.docx"))
                 os.remove("_tmp.docx")
             elif mime and mime.startswith("image/"):
-                from openai import OpenAI
-                client = OpenAI(api_key=self.valves.OPENAI_API_KEY)
                 b64 = base64.b64encode(content).decode()
-                res = client.chat.completions.create(
+                res = self.client.chat.completions.create(
                     model=self.valves.MODEL_ID,
                     messages=[{"role": "user", "content": [
                         {"type": "text", "text": "Распознай текст на изображении."},
@@ -203,25 +202,18 @@ class Pipeline:
 - Не избегайте статистики: указывайте проценты, количество, динамику
 """
 
-        model = ChatOpenAI(
-            api_key=self.valves.OPENAI_API_KEY,
-            model=self.valves.MODEL_ID,
-            temperature=self.valves.TEMPERATURE,
-            streaming=True
-        )
+        async def _generate() -> str:
+            try:
+                response = self.client.responses.create(
+                    model="gpt-4.1",
+                    tools=[{"type": "web_search_preview"}],
+                    input=f"{system_msg}\n\n<проект>\n{user_message}"
+                )
+                return response.output_text
+            except Exception as e:
+                logging.error(f"❌ Ошибка генерации: {e}")
+                return "❌ Ошибка генерации ответа. Попробуйте ещё раз."
 
-        prompt = ChatPromptTemplate.from_messages([
-            SystemMessagePromptTemplate.from_template(system_message),
-            HumanMessagePromptTemplate.from_template("{user_input}")
-        ])
-
-        formatted_messages = prompt.format_messages(user_input=user_message)
-
-        def generate_stream() -> Iterator[str]:
-            for chunk in model.stream(formatted_messages):
-                content = getattr(chunk, "content", None)
-                if content:
-                    logging.debug(f"Model chunk: {content}")
-                    yield content
-
-        return asyncio.run(self.make_request_with_retry(generate_stream))
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(_generate())
