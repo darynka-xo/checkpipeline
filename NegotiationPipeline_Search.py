@@ -6,8 +6,7 @@ from typing import List, Iterator, Callable, Any, Dict
 from pydantic import BaseModel
 import httpx
 from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.prompts import SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
@@ -54,14 +53,96 @@ class Pipeline:
             logging.error(f"Search API error: {e}")
             return {"search_required": False, "context": "", "citations": []}
 
-    def pipe(
-        self, user_message: str, model_id: str, messages: List[dict], body: dict
-    ) -> Iterator[str]:
-        system_message = """
+    async def call_deep_extract_api(self, prompt: str, citations: List[str]) -> str:
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.post(
+                    self.valves.SEARCH_API_URL.replace("/check_and_search", "/deep_extract_and_analyze"),
+                    json={"prompt": prompt, "citations": citations, "pipeline": "NegotiationPipeline"}
+                )
+                response.raise_for_status()
+                return response.json().get("legal_context", "")
+        except Exception as e:
+            logging.error(f"Deep extract API error: {e}")
+            return ""
+
+    async def inlet(self, body: dict, user: dict) -> dict:
+        import json
+        import base64
+        import mimetypes
+        import io
+        import fitz
+        from PIL import Image
+        import docx2txt
+        from openai import OpenAI
+
+        logging.info(f"📥 Received inlet body:\n{json.dumps(body, indent=2, ensure_ascii=False)}")
+        files = body.get("files", [])
+        extracted_texts = []
+
+        for file in files:
+            content_url = file["url"] + "/content"
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(content_url)
+                content = response.content
+
+            mime_type = file.get("mime_type") or mimetypes.guess_type(file.get("name", ""))[0]
+
+            if mime_type == "application/pdf":
+                doc = fitz.open(stream=content, filetype="pdf")
+                text = "\n".join([page.get_text() for page in doc])
+                extracted_texts.append(text)
+
+            elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                with open("temp.docx", "wb") as f:
+                    f.write(content)
+                text = docx2txt.process("temp.docx")
+                os.remove("temp.docx")
+                extracted_texts.append(text)
+
+            elif mime_type and mime_type.startswith("image/"):
+                base64_image = base64.b64encode(content).decode("utf-8")
+                client = OpenAI(api_key=self.valves.OPENAI_API_KEY)
+                ocr_response = client.chat.completions.create(
+                    model=self.valves.MODEL_ID,
+                    messages=[
+                        {"role": "user", "content": [
+                            {"type": "text", "text": "Распознай текст на изображении."},
+                            {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}}
+                        ]}
+                    ]
+                )
+                image_text = ocr_response.choices[0].message.content.strip()
+                extracted_texts.append(image_text)
+
+        body["file_text"] = "\n".join(extracted_texts)
+        return body
+
+    def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Iterator[str]:
+        file_text = body.get("file_text", "")
+        if file_text:
+            user_message += f"\n\nТекст из прикреплённых документов:\n{file_text}"
+
+        search_result = asyncio.run(self.call_search_api(user_message))
+        if search_result["search_required"] and search_result["context"]:
+            user_message += "\n\nКонтекст из официальных источников:\n" + search_result["context"]
+
+        deep_legal_context = ""
+        if search_result["search_required"] and search_result["citations"]:
+            deep_legal_context = asyncio.run(self.call_deep_extract_api(user_message, search_result["citations"]))
+            if deep_legal_context:
+                user_message += ("\n\n📘 Подтверждённые нормы закона (из официальных источников):\n"
+                                 f"{deep_legal_context}\n"
+                                 "\n❗️Используй только эти нормы для анализа.")
+
+        system_message = f"""
 **Роль:** Вы — эксперт по переговорам и стратегическому управлению. Ваша специализация — анализ и прогнозирование успешности различных моделей ведения переговоров, а также построение компромиссных стратегий для разрешения конфликтов между несколькими сторонами.
 
+**Контекст из нормативных документов:**
+{deep_legal_context or "—"}
+
 **Область ответственности:**
-Вы анализируете конфликтные интересы между сторонами, выделяете их цели, выявляете сильные и слабые стороны их позиций и предлагаете обоснованные стратегии компромисса. Вы не отвечаете на вопросы, не связанные с переговорами и стратегиями убеждения.
+Вы анализируете конфликтные интересы между сторонами, выделяете их цели, выявляете сильные и слабые стороны их позиций и предлагаете обоснованные стратегии компромисса.
 
 **Цель:**
 1. Проанализировать конфликтную ситуацию с участием двух или более сторон.
@@ -70,7 +151,6 @@ class Pipeline:
 4. Найти компромисс, удовлетворяющий интересам всех сторон (насколько это возможно).
 
 **Структура ответа:**
-
 ### 1. Стороны переговоров
 - Краткое описание участников и их интересов.
 
@@ -85,8 +165,6 @@ class Pipeline:
 - Сильные стороны: ...
 - Слабые стороны: ...
 
-(добавьте больше сторон, если необходимо)
-
 ### 3. Потенциальные компромиссы
 - Перечень предложений, которые могут частично или полностью удовлетворить все стороны.
 - Указание на то, какие интересы каждой стороны учтены и какие остаются спорными.
@@ -98,12 +176,6 @@ class Pipeline:
 - Предложение оптимального подхода с объяснением.
 - Уточняющие вопросы для сторон (если информация неполна).
 """
-
-        search_result = asyncio.run(self.call_search_api(user_message))
-
-        enriched_prompt = user_message
-        if search_result["search_required"] and search_result["context"]:
-            enriched_prompt += "\n\nКонтекст по официальным источникам:\n" + search_result["context"]
 
         model = ChatOpenAI(
             api_key=self.valves.OPENAI_API_KEY,
@@ -118,14 +190,13 @@ class Pipeline:
             HumanMessagePromptTemplate.from_template("{user_input}")
         ])
 
-        formatted_messages = prompt.format_messages(user_input=enriched_prompt)
+        formatted_messages = prompt.format_messages(user_input=user_message)
 
         def generate_stream() -> Iterator[str]:
             for chunk in model.stream(formatted_messages):
                 content = getattr(chunk, "content", None)
                 if content:
                     yield content
-
             if search_result["search_required"] and search_result["citations"]:
                 yield "\n\n### Использованные источники:"
                 for i, link in enumerate(search_result["citations"], 1):
