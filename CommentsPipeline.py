@@ -45,15 +45,28 @@ class Pipeline:
         logging.info("Pipeline is shutting down…")
 
     async def inlet(self, body: dict, user: dict) -> dict:
-        logging.info("📥 Inlet body received")
+        import json
+        logging.info("📥 Inlet body:\n" + json.dumps(body, indent=2, ensure_ascii=False))
 
         extracted = []
         for f in body.get("files", []):
-            content_url = f["url"] + "/content"
-            async with httpx.AsyncClient(timeout=30) as c:
-                resp = await c.get(content_url)
-                resp.raise_for_status()
-                content = resp.content
+            url = f.get("url", "")
+            content = None
+
+            if url.startswith("http://") or url.startswith("https://"):
+                content_url = url + "/content"
+                async with httpx.AsyncClient(timeout=30) as c:
+                    resp = await c.get(content_url)
+                    resp.raise_for_status()
+                    content = resp.content
+            elif url.startswith("data:"):
+                # Пример: data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,...
+                header, b64data = url.split(",", 1)
+                content = base64.b64decode(b64data)
+            else:
+                logging.warning(f"⚠️ Unsupported or missing URL scheme: {url}")
+                continue
+
             mime = f.get("mime_type") or mimetypes.guess_type(f.get("name", ""))[0]
             if mime == "application/pdf":
                 doc = fitz.open(stream=content, filetype="pdf")
@@ -73,8 +86,10 @@ class Pipeline:
                     ]}]
                 )
                 extracted.append(res.choices[0].message.content.strip())
+
         body["file_text"] = "\n".join(extracted)
         return body
+
 
     async def trusted_web_search(self, query: str) -> str:
         try:
