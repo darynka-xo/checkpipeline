@@ -19,7 +19,7 @@ from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTempla
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
-
+openai.api_key = os.getenv("OPENAI_API_KEY")
 class Pipeline:
     class Valves(BaseModel):
         MODEL_ID: str = "gpt-4.1"
@@ -50,15 +50,18 @@ class Pipeline:
 
     async def web_search(self, query: str) -> List[Dict[str, str]]:
         try:
-            response = self.client.responses.create(
-                model="gpt-4.1",
-                tools=[{"type": "web_search_preview"}],
-                input=query
+            response = await openai.ChatCompletion.acreate(
+                model=self.valves.MODEL_ID,
+                messages=[
+                    {"role": "system", "content": "Ты веб-поисковик. Ответь кратким обзором по запросу."},
+                    {"role": "user", "content": query}
+                ]
             )
+            text = response.choices[0].message.content
             return [{
                 "title": "OpenAI Web Search",
-                "link": "https://www.google.com/search?q=" + query.replace(" ", "+"),
-                "snippet": response.output_text
+                "link": f"https://www.google.com/search?q={query.replace(' ', '+')}",
+                "snippet": text
             }]
         except Exception as e:
             logging.warning(f"OpenAI web_search_preview error: {e}")
