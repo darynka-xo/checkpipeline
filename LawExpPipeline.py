@@ -137,6 +137,7 @@ class Pipeline:
 
 
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Iterator[str]:
+        import json
         if body.get("file_text"):
             if not user_message.strip():
                 user_message = body["file_text"]
