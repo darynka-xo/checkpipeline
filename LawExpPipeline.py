@@ -8,7 +8,7 @@ import mimetypes
 import base64
 import io
 from typing import List, Iterator, Callable, Dict
-
+import requests
 from pydantic import BaseModel
 from openai import OpenAI
 from PIL import Image
