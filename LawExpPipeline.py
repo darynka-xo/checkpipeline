@@ -14,6 +14,7 @@ from openai import OpenAI
 from PIL import Image
 import fitz
 import docx2txt
+import json
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
@@ -137,7 +138,6 @@ class Pipeline:
 
 
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Iterator[str]:
-        import json
         if body.get("file_text"):
             if not user_message.strip():
                 user_message = body["file_text"]
