@@ -155,18 +155,39 @@ class Pipeline:
             "Не придумывай статьи. Отвечай строго по законам."
         )
 
-        async def _generate() -> str:
-            try:
-                response = self.client.responses.create(
-                    model="gpt-4.1",
-                    tools=[{"type": "web_search_preview"}],
-                    input=f"{system_msg}\n\n<проект>\n{user_message}"
-                )
-                return response.output_text
-            except Exception as e:
-                logging.error(f"❌ Ошибка генерации: {e}")
-                return "❌ Ошибка генерации ответа. Попробуйте ещё раз."
+        # response = self.client.responses.create(
+        #         model="gpt-4.1",
+        #         tools=[{"type": "web_search_preview"}],
+        #         input=f"{system_msg}\n\n<проект>\n{user_message}",
+        #         stream=True,
+        #     )
+        headers = {
+            "Content-Type": "application/json"
+        }
+        headers["Authorization"] = f"Bearer {self.valves.OPENAI_API_KEY}"
+        payload = {
+            "model": 'gpt-4.1',
+            "input": f"{system_msg}\n\n<проект>\n{user_message}",
+            "tools": [
+                {"type": "web_search_preview"}
+            ],
+            "stream": True
+        }
+        response = requests.post(
+            url=f"https://api.openai.com/v1/responses",
+            headers=headers,
+            json=payload,
+            stream=True
+        )
 
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop.run_until_complete(_generate())
+        for line in response.iter_lines():
+            if not line or not line.startswith(b"data: "):
+                continue
+            data = line[6:]
+            if data == b"[DONE]":
+                break
+            event = json.loads(data)
+            if event.get("type") == "response.output_text.delta":
+                yield event["delta"]
+            elif event.get("type") == "response.output_text.done":
+                pass
